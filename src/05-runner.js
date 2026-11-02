@@ -250,6 +250,12 @@
         } else {
           log("success", `投递成功【${formatJob(job)}】`);
         }
+        if (result.imageResume) {
+          log(
+            result.imageResume.ok ? "success" : "warn",
+            `图片简历${result.imageResume.ok ? "发送成功" : "发送失败"}【${formatJob(job)}】：${result.imageResume.message}`,
+          );
+        }
         if (
           Number.isFinite(result.remainingQuota) &&
           result.remainingQuota <= 3

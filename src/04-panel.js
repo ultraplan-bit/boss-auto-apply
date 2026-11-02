@@ -106,6 +106,7 @@
       #${PANEL_ID} label { color: #334155; font-size: 12px; }
       #${PANEL_ID} input[type="text"],
       #${PANEL_ID} input[type="number"],
+      #${PANEL_ID} input[type="file"],
       #${PANEL_ID} textarea,
       #${PANEL_ID} select {
         width: 100%;
@@ -229,6 +230,8 @@
       adapter?.id === "liepin"
         ? textAreaHtml("liepinGreeting", "猎聘招呼语（未自动发送时补发）")
         : "";
+    const bossImageResumeSettings =
+      adapter?.id === "boss" ? renderBossImageResumeSettings() : "";
     const shixisengSettings =
       adapter?.id === "shixiseng" ? renderShixisengSettings() : "";
 
@@ -257,6 +260,7 @@
           ${textAreaHtml("includeDescriptionKeywords", "岗位详情包含关键词")}
           ${textAreaHtml("excludeDescriptionKeywords", "岗位详情排除关键词")}
           ${liepinGreetingField}
+          ${bossImageResumeSettings}
           ${shixisengSettings}
         </form>
         <div class="aj-actions">
@@ -264,6 +268,17 @@
           <button class="aj-btn aj-btn-danger" data-action="stop" ${state.running ? "" : "disabled"}>停止</button>
         </div>
         <div class="aj-logs">${logsHtml}</div>
+      </div>
+    `;
+  }
+
+  function renderBossImageResumeSettings() {
+    return `
+      <div class="aj-field aj-wide">
+        ${checkboxHtml("bossImageResumeEnabled", "打招呼后自动发送图片简历")}
+        <input type="file" name="bossResumeImage" accept="image/jpeg,image/png,image/gif,image/webp" ${state.bossResumeImage ? "disabled" : ""}>
+        ${state.bossResumeImage ? '<button class="aj-btn" type="button" data-action="clear-boss-resume">清除图片</button>' : ""}
+        <span data-role="boss-resume-image-name">${htmlEscape(state.bossResumeImage?.name || "请选择图片简历（仅在当前页面有效）")}</span>
       </div>
     `;
   }
@@ -356,6 +371,26 @@
   function handleFormInput(event) {
     const form = cachedPanel?.querySelector('[data-role="config-form"]');
     if (!form || !form.contains(event.target)) return;
+    if (event.target instanceof HTMLInputElement && event.target.type === "file") {
+      const file = event.target.files?.[0] || null;
+      const validTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+      if (file && file.size > 10 * 1024 * 1024) {
+        event.target.value = "";
+        state.bossResumeImage = null;
+        log("warn", "图片简历不能超过 10 MB");
+        return;
+      }
+      if (file && !validTypes.includes(file.type)) {
+        event.target.value = "";
+        state.bossResumeImage = null;
+        log("warn", "图片简历仅支持 JPG、PNG、GIF 或 WebP 格式");
+        return;
+      }
+      state.bossResumeImage = file;
+      const name = cachedPanel.querySelector('[data-role="boss-resume-image-name"]');
+      if (name) name.textContent = file?.name || "请选择图片简历（仅在当前页面有效）";
+      return;
+    }
     saveConfig(collectFormConfig(), true);
   }
 
@@ -367,6 +402,12 @@
     if (!target) return;
     event.preventDefault();
     const action = target.getAttribute("data-action");
+
+    if (action === "clear-boss-resume") {
+      state.bossResumeImage = null;
+      renderPanel();
+      return;
+    }
 
     if (action === "toggle-collapse") {
       state.collapsed = !state.collapsed;

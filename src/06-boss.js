@@ -16,6 +16,9 @@
         reason: "未读取到登录 token。请先在浏览器里自行登录 Boss 直聘。",
       };
     }
+    if (config.bossImageResumeEnabled && !state.bossResumeImage) {
+      return { ok: false, reason: "已启用图片简历发送，请先选择图片简历。" };
+    }
     return { ok: true };
   }
 
@@ -90,6 +93,10 @@
       brandIndustry: pickFirstString(raw, ["brandIndustry", "industryName"]),
       jobLabels: raw.jobLabels || raw.labels || raw.skills || [],
       skills: raw.skills || [],
+      detailUrl:
+        pickFirstString(raw, ["detailUrl", "jobUrl", "url"]) ||
+        card.querySelector('a[href*="/job_detail/"]')?.href ||
+        "",
       contact: Boolean(
         raw.contact ||
         raw.friendStatus === 1 ||
@@ -281,12 +288,16 @@
       data?.message === "Success" ||
       message === "Success"
     ) {
-      return {
+      const result = {
         ok: true,
         message: message || "Success",
         remainingQuota,
         raw: data,
       };
+      if (config.bossImageResumeEnabled) {
+        result.imageResume = await sendBossImageResume(job);
+      }
+      return result;
     }
 
     const limited = isHardLimitMessage(fullMessage);
@@ -308,6 +319,163 @@
       message: fullMessage || `接口返回 code=${data?.code}`,
       raw: data,
     };
+  }
+
+  async function sendBossImageResume(job) {
+    const file = state.bossResumeImage;
+    if (!file) return { ok: false, message: "未选择图片简历" };
+
+    let detailUrl;
+    try {
+      detailUrl = new URL(job.detailUrl, location.origin);
+    } catch (error) {
+      return { ok: false, message: "缺少有效的职位详情页地址" };
+    }
+    if (
+      detailUrl.origin !== location.origin ||
+      !detailUrl.pathname.startsWith("/job_detail/")
+    ) {
+      return { ok: false, message: "缺少有效的职位详情页地址" };
+    }
+
+    const frame = document.createElement("iframe");
+    frame.src = detailUrl.href;
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.cssText =
+      "position:fixed;left:0;top:0;width:1280px;height:900px;border:0;opacity:0.01;z-index:-2147483647;pointer-events:none;";
+    document.body.appendChild(frame);
+
+    try {
+      await new Promise((resolve) => {
+        frame.addEventListener("load", resolve, { once: true });
+        setTimeout(resolve, 10000);
+      });
+      let targetDoc = frame.contentDocument;
+      if (!targetDoc) return { ok: false, message: "无法读取职位聊天页面" };
+
+      const findUploadControl = () =>
+        [...(targetDoc?.querySelectorAll(
+          'div.btn-sendimg[aria-label="发送图片"], div[aria-label="发送图片"].btn-sendimg, [aria-label="发送图片"]',
+        ) || [])].find((control) =>
+          control.querySelector('input[type="file"]'),
+        );
+      const findMessagesRoot = () =>
+        targetDoc?.querySelector(".chat-message .im-list, .chat-record");
+      const findChatButton = (pattern) =>
+        [...(targetDoc?.querySelectorAll("a.btn-startchat, a.op-btn-chat") || [])].find(
+          (button) =>
+            pattern.test(
+              normalizeText(button.innerText || button.textContent || ""),
+            ),
+        );
+      const waitForChat = async () => {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          targetDoc = frame.contentDocument;
+          uploadControl = findUploadControl();
+          uploadInput = uploadControl?.querySelector('input[type="file"]');
+          messagesRoot = findMessagesRoot();
+          if (uploadInput && messagesRoot) return true;
+          await sleep(500);
+        }
+        return false;
+      };
+
+      let uploadControl = findUploadControl();
+      let uploadInput = uploadControl?.querySelector('input[type="file"]');
+      let messagesRoot = findMessagesRoot();
+      if (!uploadInput || !messagesRoot) {
+        const chatButton = findChatButton(/立即沟通|继续沟通/);
+        if (!chatButton) {
+          return { ok: false, message: "职位详情页未找到沟通入口" };
+        }
+        chatButton.click();
+        await waitForChat();
+      }
+
+      if (!uploadInput) {
+        targetDoc?.querySelector("i.icon-close")?.click();
+        await sleep(500);
+        const fullChatButton = findChatButton(/继续沟通/);
+        if (fullChatButton) {
+          fullChatButton.click();
+          await waitForChat();
+        }
+      }
+      if (!uploadInput) {
+        return { ok: false, message: "职位聊天未提供图片上传控件" };
+      }
+      if (!messagesRoot) {
+        return { ok: false, message: "无法定位聊天消息列表" };
+      }
+
+      const imageMessages = () =>
+        [...(messagesRoot?.querySelectorAll("li.message-item.item-myself") || [])].filter(
+          (item) =>
+            item.querySelector(
+              ".message-content img, .message-content [class*=image-content], .message-content [class*=message-image], .message-content [class*=message-img], .message-content [style*=background-image]",
+            ),
+        );
+      const previousCount = imageMessages().length;
+      uploadControl = findUploadControl();
+      if (!uploadControl || uploadControl.querySelector('input[type="file"]') !== uploadInput) {
+        return { ok: false, message: "未找到 Boss 的发送图片按钮" };
+      }
+      const transfer = new targetDoc.defaultView.DataTransfer();
+      transfer.items.add(file);
+      uploadInput.files = transfer.files;
+      uploadInput.dispatchEvent(
+        new targetDoc.defaultView.Event("input", { bubbles: true }),
+      );
+      uploadInput.dispatchEvent(
+        new targetDoc.defaultView.Event("change", { bubbles: true }),
+      );
+      await sleep(1000);
+      let stableSeconds = 0;
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await sleep(1000);
+        targetDoc = frame.contentDocument;
+        messagesRoot = findMessagesRoot();
+        if (!messagesRoot) continue;
+        const sentImages = imageMessages();
+        const message = sentImages[sentImages.length - 1];
+        if (sentImages.length <= previousCount || !message) {
+          stableSeconds = 0;
+          continue;
+        }
+
+        const text = normalizeText(message.innerText || message.textContent || "");
+        const classes = [message, ...message.querySelectorAll("*")]
+          .map((element) =>
+            typeof element.className === "string" ? element.className : "",
+          )
+          .join(" ")
+          .toLowerCase();
+        if (
+          /上传失败|发送失败|点击重试/.test(text) ||
+          /upload-fail|upload-error|send-fail|send-error|message-fail/.test(
+            classes,
+          )
+        ) {
+          return { ok: false, message: "Boss 页面显示图片发送失败" };
+        }
+        if (
+          /上传中|发送中/.test(text) ||
+          /uploading|sending|upload-progress|send-progress/.test(classes)
+        ) {
+          stableSeconds = 0;
+          continue;
+        }
+        stableSeconds += 1;
+        if (stableSeconds >= 3) {
+          return { ok: true, message: "图片简历已发送" };
+        }
+      }
+      return { ok: false, message: "等待 60 秒仍未确认图片发送完成" };
+    } catch (error) {
+      return { ok: false, message: `图片发送异常：${error.message || error}` };
+    } finally {
+      frame.remove();
+    }
   }
 
   function buildBossHeaders() {

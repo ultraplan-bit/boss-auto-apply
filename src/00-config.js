@@ -5,7 +5,7 @@ const APP_ID = "boss-auto-apply-lite";
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.5";
+  const VERSION = "0.2.6";
 
   const DEFAULT_CONFIG = {
     autoNextPage: true,
@@ -29,6 +29,7 @@ const APP_ID = "boss-auto-apply-lite";
     shixisengDays: "",
     liepinGreeting:
       "您好，我对贵公司发布的这个职位很感兴趣，期待进一步了解。",
+    bossImageResumeEnabled: false,
   };
 
   const BOSS_SELECTORS = {
@@ -169,6 +170,7 @@ const APP_ID = "boss-auto-apply-lite";
     current: "未开始",
     logs: [],
     processedKeys: new Set(),
+    bossResumeImage: null,
   };
 
   // 智联岗位卡片对应的 Vue 数据缓存，避免每张卡片重复深度遍历。
