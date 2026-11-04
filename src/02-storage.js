@@ -55,7 +55,6 @@
     output.fetchDetail = true;
     output.skipAppliedHistory = true;
     output.skipHeadhunter = true;
-    output.treatChatRemindAsSuccess = true;
 
     return output;
   }

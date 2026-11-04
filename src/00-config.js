@@ -5,7 +5,7 @@ const APP_ID = "boss-auto-apply-lite";
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.6";
+  const VERSION = "0.2.7";
 
   const DEFAULT_CONFIG = {
     autoNextPage: true,
@@ -14,7 +14,6 @@ const APP_ID = "boss-auto-apply-lite";
     skipAppliedHistory: true,
     skipHeadhunter: true,
     onlyOnlineBoss: false,
-    treatChatRemindAsSuccess: true,
     maxApplyCount: 9999,
     dailyLimit: 150,
     delayMinSec: 4,

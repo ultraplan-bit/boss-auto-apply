@@ -246,11 +246,12 @@
     return Number.POSITIVE_INFINITY;
   }
 
-  async function applyBossJob(job) {
+  async function applyBossJob(job, extraParams = {}) {
     const params = new URLSearchParams({
       securityId: job.securityId,
       jobId: job.encryptJobId,
       lid: job.lid,
+      ...extraParams,
     });
 
     const response = await fetch(
@@ -303,12 +304,38 @@
     const limited = isHardLimitMessage(fullMessage);
     const isChatRemind =
       Boolean(chatRemindDialog) || /开聊提醒/.test(fullMessage);
-    if (isChatRemind && !limited && config.treatChatRemindAsSuccess) {
+    if (isChatRemind && !limited) {
+      const reminder = chatRemindText || message || "开聊提醒";
+      if (extraParams.cid) {
+        return {
+          ok: false,
+          limited: true,
+          message: `已确认开聊提醒，平台仍未放行：${reminder}`,
+          remainingQuota,
+          raw: data,
+        };
+      }
+      if (remainingQuota > 0) {
+        // 每日沟通满 120 位后 Boss 会先弹「开聊提醒」；网页端点「好」时上报埋点，再带 cid=1 重新发起沟通。
+        await fetch("/wapi/zpCommon/actionLog/geek/chatremind.json", {
+          method: "POST",
+          credentials: "include",
+          headers: buildBossHeaders(),
+          body: new URLSearchParams({
+            action: "addf-limit-popup-c",
+            ba: chatRemindDialog?.ba || "",
+          }),
+        }).catch(() => {});
+        await sleep(randomBetween(1000, 2000));
+        const confirmed = await applyBossJob(job, { cid: 1 });
+        return confirmed.ok
+          ? { ...confirmed, remainingQuota: remainingQuota - 1 }
+          : confirmed;
+      }
       return {
-        ok: true,
-        softSuccess: true,
-        message: chatRemindText || message || "开聊提醒",
-        remainingQuota,
+        ok: false,
+        skipped: true,
+        message: `开聊提醒未确认：${reminder}`,
         raw: data,
       };
     }

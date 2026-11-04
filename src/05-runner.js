@@ -233,12 +233,15 @@
       state.matched += 1;
 
       const result = await adapter.apply(job, applySession);
+      if (result.ok || result.skipped || result.limited) {
+        if (Number.isFinite(result.remainingQuota)) {
+          state.platformRemainingQuota = result.remainingQuota;
+          renderPanel();
+        }
+      }
       if (result.ok) {
         state.applied += 1;
         recordApplied(job);
-        if (Number.isFinite(result.remainingQuota)) {
-          state.platformRemainingQuota = result.remainingQuota;
-        }
         if (result.softSuccess) {
           const quotaNote = Number.isFinite(result.remainingQuota)
             ? `（平台剩余 ${result.remainingQuota} 次）`

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Boss/猎聘/智联/前程无忧 自动投递助手
 // @namespace    https://github.com/ultraplan-bit/boss-auto-apply
-// @version      0.2.6
+// @version      0.2.7
 // @description  在 Boss 直聘、猎聘、智联招聘、前程无忧的职位列表页按筛选规则自动批量投递（基于 muyuniao 原脚本二次开发）。
 // @author       plove
 // @homepageURL  https://github.com/ultraplan-bit/boss-auto-apply
@@ -38,7 +38,7 @@
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.6";
+  const VERSION = "0.2.7";
 
   const DEFAULT_CONFIG = {
     autoNextPage: true,
@@ -47,7 +47,6 @@
     skipAppliedHistory: true,
     skipHeadhunter: true,
     onlyOnlineBoss: false,
-    treatChatRemindAsSuccess: true,
     maxApplyCount: 9999,
     dailyLimit: 150,
     delayMinSec: 4,
@@ -401,7 +400,6 @@
     output.fetchDetail = true;
     output.skipAppliedHistory = true;
     output.skipHeadhunter = true;
-    output.treatChatRemindAsSuccess = true;
 
     return output;
   }
@@ -1558,12 +1556,15 @@
       state.matched += 1;
 
       const result = await adapter.apply(job, applySession);
+      if (result.ok || result.skipped || result.limited) {
+        if (Number.isFinite(result.remainingQuota)) {
+          state.platformRemainingQuota = result.remainingQuota;
+          renderPanel();
+        }
+      }
       if (result.ok) {
         state.applied += 1;
         recordApplied(job);
-        if (Number.isFinite(result.remainingQuota)) {
-          state.platformRemainingQuota = result.remainingQuota;
-        }
         if (result.softSuccess) {
           const quotaNote = Number.isFinite(result.remainingQuota)
             ? `（平台剩余 ${result.remainingQuota} 次）`
@@ -1929,11 +1930,12 @@
     return Number.POSITIVE_INFINITY;
   }
 
-  async function applyBossJob(job) {
+  async function applyBossJob(job, extraParams = {}) {
     const params = new URLSearchParams({
       securityId: job.securityId,
       jobId: job.encryptJobId,
       lid: job.lid,
+      ...extraParams,
     });
 
     const response = await fetch(
@@ -1986,12 +1988,38 @@
     const limited = isHardLimitMessage(fullMessage);
     const isChatRemind =
       Boolean(chatRemindDialog) || /开聊提醒/.test(fullMessage);
-    if (isChatRemind && !limited && config.treatChatRemindAsSuccess) {
+    if (isChatRemind && !limited) {
+      const reminder = chatRemindText || message || "开聊提醒";
+      if (extraParams.cid) {
+        return {
+          ok: false,
+          limited: true,
+          message: `已确认开聊提醒，平台仍未放行：${reminder}`,
+          remainingQuota,
+          raw: data,
+        };
+      }
+      if (remainingQuota > 0) {
+        // 每日沟通满 120 位后 Boss 会先弹「开聊提醒」；网页端点「好」时上报埋点，再带 cid=1 重新发起沟通。
+        await fetch("/wapi/zpCommon/actionLog/geek/chatremind.json", {
+          method: "POST",
+          credentials: "include",
+          headers: buildBossHeaders(),
+          body: new URLSearchParams({
+            action: "addf-limit-popup-c",
+            ba: chatRemindDialog?.ba || "",
+          }),
+        }).catch(() => {});
+        await sleep(randomBetween(1000, 2000));
+        const confirmed = await applyBossJob(job, { cid: 1 });
+        return confirmed.ok
+          ? { ...confirmed, remainingQuota: remainingQuota - 1 }
+          : confirmed;
+      }
       return {
-        ok: true,
-        softSuccess: true,
-        message: chatRemindText || message || "开聊提醒",
-        remainingQuota,
+        ok: false,
+        skipped: true,
+        message: `开聊提醒未确认：${reminder}`,
         raw: data,
       };
     }
