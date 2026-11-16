@@ -13,6 +13,8 @@
       getCards: getBossJobCardElements,
       buildJob: buildBossJobDetail,
       fetchDetail: fetchBossJobDetail,
+      // 活跃度和“已沟通”过滤依赖详情接口，即使没配置关键词也要抓取。
+      alwaysFetchDetail: true,
       apply: applyBossJob,
       nextPage: goBossNextPageOrScroll,
       canApply: (job) =>
@@ -114,8 +116,8 @@
   function getDailyLimit(adapter = getAdapter()) {
     const platformLimit = adapter ? PLATFORM_DAILY_LIMITS[adapter.id] : null;
     return Number.isFinite(platformLimit)
-      ? Math.min(config.dailyLimit, platformLimit)
-      : config.dailyLimit;
+      ? Math.min(DAILY_LIMIT, platformLimit)
+      : DAILY_LIMIT;
   }
 
   function isSupportedListPage() {

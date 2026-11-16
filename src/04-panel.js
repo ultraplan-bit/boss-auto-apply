@@ -200,9 +200,13 @@
       .replace(/'/g, "&#039;");
   }
 
+  // 面板骨架和表单只渲染一次；运行中只更新状态、统计和日志，
+  // 避免整块重绘打断正在输入的关键词。
   function renderPanel() {
     if (!cachedPanel) return;
     const adapter = getAdapter();
+    if (!cachedPanel.firstElementChild) renderPanelSkeleton(adapter);
+
     const history = loadHistory();
     cachedPanel.classList.toggle("is-collapsed", state.collapsed);
     const runningText = state.running
@@ -223,9 +227,61 @@
         )
         .join("")
       : '<div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>';
+
+    const part = (selector) => cachedPanel.querySelector(selector);
+    part('[data-role="subtitle"]').textContent =
+      `v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}`;
+    part('[data-action="toggle-collapse"]').textContent = state.collapsed
+      ? "展开"
+      : "收起";
+    part('[data-role="stats"]').innerHTML = [
+      [state.scanned, "扫描"],
+      [state.matched, "匹配"],
+      [state.applied, "成功"],
+      [state.skipped, "跳过"],
+      [state.failed, "失败"],
+    ]
+      .map(
+        ([value, label]) =>
+          `<div class="aj-stat"><b>${value}</b><span>${label}</span></div>`,
+      )
+      .join("");
+    part('[data-role="current"]').textContent = `当前：${state.current}`;
+    part('[data-action="start"]').disabled = state.running;
+    part('[data-action="stop"]').disabled = !state.running;
+    part('[data-role="logs"]').innerHTML = logsHtml;
+  }
+
+  function renderPanelSkeleton(adapter) {
     const title = adapter ? `${adapter.label} 自动投递助手` : "自动投递助手";
+    cachedPanel.innerHTML = `
+      <div class="aj-header">
+        <div>
+          <div class="aj-title">${htmlEscape(title)}</div>
+          <div class="aj-subtitle" data-role="subtitle"></div>
+        </div>
+        <button class="aj-icon-btn" data-action="toggle-collapse"></button>
+      </div>
+      <div class="aj-body">
+        <div class="aj-status" data-role="stats"></div>
+        <div class="aj-current" data-role="current"></div>
+        <form class="aj-form" data-role="config-form"></form>
+        <div class="aj-actions">
+          <button class="aj-btn aj-btn-primary" data-action="start">开始</button>
+          <button class="aj-btn aj-btn-danger" data-action="stop">停止</button>
+        </div>
+        <div class="aj-logs" data-role="logs"></div>
+      </div>
+    `;
+    renderConfigForm();
+  }
+
+  function renderConfigForm() {
+    const form = cachedPanel?.querySelector('[data-role="config-form"]');
+    if (!form) return;
+    const adapter = getAdapter();
     const onlineLabel = adapter?.onlineLabel || "仅在线 BOSS";
-    // 猎聘招呼语只在猎聘页面显示，避免影响另外两个平台的面板。
+    // 平台专属设置只在对应平台显示，避免影响其它平台的面板。
     const liepinGreetingField =
       adapter?.id === "liepin"
         ? textAreaHtml("liepinGreeting", "猎聘招呼语（未自动发送时补发）")
@@ -235,40 +291,16 @@
     const shixisengSettings =
       adapter?.id === "shixiseng" ? renderShixisengSettings() : "";
 
-    cachedPanel.innerHTML = `
-      <div class="aj-header">
-        <div>
-          <div class="aj-title">${htmlEscape(title)}</div>
-          <div class="aj-subtitle">v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}</div>
-        </div>
-        <button class="aj-icon-btn" data-action="toggle-collapse">${state.collapsed ? "展开" : "收起"}</button>
+    form.innerHTML = `
+      <div class="aj-checks">
+        ${checkboxHtml("onlyOnlineBoss", onlineLabel)}
+        ${checkboxHtml("debug", "调试日志")}
       </div>
-      <div class="aj-body">
-        <div class="aj-status">
-          <div class="aj-stat"><b>${state.scanned}</b><span>扫描</span></div>
-          <div class="aj-stat"><b>${state.matched}</b><span>匹配</span></div>
-          <div class="aj-stat"><b>${state.applied}</b><span>成功</span></div>
-          <div class="aj-stat"><b>${state.skipped}</b><span>跳过</span></div>
-          <div class="aj-stat"><b>${state.failed}</b><span>失败</span></div>
-        </div>
-        <div class="aj-current">当前：${htmlEscape(state.current)}</div>
-        <form class="aj-form" data-role="config-form">
-          <div class="aj-checks">
-            ${checkboxHtml("onlyOnlineBoss", onlineLabel)}
-            ${checkboxHtml("debug", "调试日志")}
-          </div>
-          ${textAreaHtml("includeDescriptionKeywords", "岗位详情包含关键词")}
-          ${textAreaHtml("excludeDescriptionKeywords", "岗位详情排除关键词")}
-          ${liepinGreetingField}
-          ${bossImageResumeSettings}
-          ${shixisengSettings}
-        </form>
-        <div class="aj-actions">
-          <button class="aj-btn aj-btn-primary" data-action="start" ${state.running ? "disabled" : ""}>开始</button>
-          <button class="aj-btn aj-btn-danger" data-action="stop" ${state.running ? "" : "disabled"}>停止</button>
-        </div>
-        <div class="aj-logs">${logsHtml}</div>
-      </div>
+      ${textAreaHtml("includeDescriptionKeywords", "岗位详情包含关键词")}
+      ${textAreaHtml("excludeDescriptionKeywords", "岗位详情排除关键词")}
+      ${liepinGreetingField}
+      ${bossImageResumeSettings}
+      ${shixisengSettings}
     `;
   }
 
@@ -387,8 +419,7 @@
         return;
       }
       state.bossResumeImage = file;
-      const name = cachedPanel.querySelector('[data-role="boss-resume-image-name"]');
-      if (name) name.textContent = file?.name || "请选择图片简历（仅在当前页面有效）";
+      renderConfigForm();
       return;
     }
     saveConfig(collectFormConfig(), true);
@@ -405,7 +436,7 @@
 
     if (action === "clear-boss-resume") {
       state.bossResumeImage = null;
-      renderPanel();
+      renderConfigForm();
       return;
     }
 

@@ -35,27 +35,16 @@
   }
 
   function loadConfig() {
-    const stored = gmGet(CONFIG_KEY, {});
-    return normalizeConfig({ ...DEFAULT_CONFIG, ...(stored || {}) });
+    return normalizeConfig(gmGet(CONFIG_KEY, {}));
   }
 
+  // 只保留当前支持的配置项，旧版本遗留的字段会被丢弃。
   function normalizeConfig(input) {
-    const output = { ...DEFAULT_CONFIG, ...(input || {}) };
-
-    // 强行锁死固定参数，忽略存储的旧数据
-    output.maxApplyCount = DEFAULT_CONFIG.maxApplyCount;
-    output.dailyLimit = DEFAULT_CONFIG.dailyLimit;
-    output.delayMinSec = DEFAULT_CONFIG.delayMinSec;
-    output.delayMaxSec = DEFAULT_CONFIG.delayMaxSec;
-    output.pageDelaySec = DEFAULT_CONFIG.pageDelaySec;
-    output.activeWithinDays = DEFAULT_CONFIG.activeWithinDays;
-
-    // 强制锁定默认开启的配置
-    output.autoNextPage = true;
-    output.fetchDetail = true;
-    output.skipAppliedHistory = true;
-    output.skipHeadhunter = true;
-
+    const output = {};
+    for (const [key, fallback] of Object.entries(DEFAULT_CONFIG)) {
+      const value = input?.[key];
+      output[key] = typeof value === typeof fallback ? value : fallback;
+    }
     return output;
   }
 
@@ -67,24 +56,52 @@
     }
   }
 
-  function getToday() {
-    const date = new Date();
+  function formatDate(date) {
     const year = date.getFullYear();
     const month = `${date.getMonth() + 1}`.padStart(2, "0");
     const day = `${date.getDate()}`.padStart(2, "0");
     return `${year}-${month}-${day}`;
   }
 
+  function getToday() {
+    return formatDate(new Date());
+  }
+
+  // 结构：{ date, dailyCount, applied: { 职位 key: 投递日期 } }。
+  // 旧版只记录当天的 appliedKeys，读取时按其 date 迁移。
   function loadHistory() {
     const today = getToday();
-    const history = gmGet(getHistoryKey(), null) || {};
-    if (history.date !== today) {
-      return { date: today, dailyCount: 0, appliedKeys: [] };
+    const stored = gmGet(getHistoryKey(), null) || {};
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - HISTORY_RETENTION_DAYS);
+    const cutoff = formatDate(cutoffDate);
+
+    const applied = {};
+    const entries = [
+      ...Object.entries(stored.applied || {}),
+      ...(Array.isArray(stored.appliedKeys)
+        ? stored.appliedKeys.map((key) => [key, stored.date])
+        : []),
+    ];
+    for (let [key, date] of entries) {
+      if (typeof date !== "string" || date <= cutoff) continue;
+      // Boss 旧 key：securityId|encryptJobId|lid|jobName|brandName。
+      if (getPlatformId() === "boss") {
+        const fields = key.split("|");
+        if (fields.length >= 5 && fields[1]) key = `boss|${fields[1]}`;
+      }
+      if (!applied[key] || date > applied[key]) applied[key] = date;
     }
-    if (!Array.isArray(history.appliedKeys)) history.appliedKeys = [];
-    if (!Number.isFinite(Number(history.dailyCount)))
-      history.dailyCount = history.appliedKeys.length;
-    return history;
+
+    let dailyCount = 0;
+    if (stored.date === today) {
+      dailyCount = Number(stored.dailyCount);
+      if (!Number.isFinite(dailyCount)) {
+        dailyCount = Object.values(applied).filter((date) => date === today)
+          .length;
+      }
+    }
+    return { date: today, dailyCount, applied };
   }
 
   function saveHistory(history) {
@@ -94,17 +111,13 @@
   function recordApplied(job) {
     const history = loadHistory();
     const key = getJobUniqueKey(job);
-    if (!history.appliedKeys.includes(key)) history.appliedKeys.push(key);
-    history.dailyCount = Math.max(
-      Number(history.dailyCount) || 0,
-      history.appliedKeys.length,
-    );
+    if (history.applied[key] !== history.date) history.dailyCount += 1;
+    history.applied[key] = history.date;
     saveHistory(history);
   }
 
-  function hasAppliedToday(job) {
-    const history = loadHistory();
-    return history.appliedKeys.includes(getJobUniqueKey(job));
+  function hasAppliedBefore(job) {
+    return Boolean(loadHistory().applied[getJobUniqueKey(job)]);
   }
 
   // =====================================================================

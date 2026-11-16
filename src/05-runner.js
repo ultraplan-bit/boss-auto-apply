@@ -4,7 +4,7 @@
 
   function getJobUniqueKey(job) {
     if (job?.key) return job.key;
-    // Boss 保持原有 key 结构，兼容历史记录。
+    // 各平台通常自带 key；缺少职位 ID 时退回用可读字段拼接。
     return [
       job.securityId,
       job.encryptJobId,
@@ -131,10 +131,6 @@
 
       for (const job of jobs) {
         if (state.stopping) break;
-        if (state.applied >= config.maxApplyCount) {
-          state.current = "达到单次上限";
-          return;
-        }
 
         const history = loadHistory();
         if (history.dailyCount >= getDailyLimit(adapter)) {
@@ -148,14 +144,6 @@
       }
 
       if (state.stopping) break;
-      if (state.applied >= config.maxApplyCount) {
-        state.current = "达到单次上限";
-        return;
-      }
-      if (!config.autoNextPage) {
-        state.current = "当前页处理完成（未开启自动翻页）";
-        return;
-      }
 
       const moved = await adapter.nextPage();
       if (!moved) {
@@ -165,7 +153,7 @@
 
       saveResumeState({ phase: "pagination" });
       pageRound += 1;
-      await sleep(config.pageDelaySec * 1000);
+      await sleep(PAGE_DELAY_SEC * 1000);
     }
 
     // 平台限额/登录风控也会设置 stopping，保留其具体原因，不要覆盖成“手动停止”。
@@ -210,26 +198,33 @@
     renderPanel();
 
     try {
-      // 详情页只用于「职位详情关键词」过滤；没有配置关键词时没必要抓取
-      // （智联详情页单页 1.5MB 左右，逐个抓取会显著拖慢投递速度；前程无忧已从列表数据读取 JD）。
-      const needJobDetail =
-        config.fetchDetail &&
-        (splitKeywords(config.includeDescriptionKeywords).length > 0 ||
-          splitKeywords(config.excludeDescriptionKeywords).length > 0);
-      const detail = needJobDetail
-        ? await safeFetchJobDetail(job, adapter)
-        : null;
-      const filter = applyFilters(job, detail, adapter);
+      // 先做不需要网络的过滤，避免为注定跳过的职位请求详情。
+      let filter = applyBasicFilters(job, adapter);
+      let fetchedDetail = false;
+      if (filter.ok) {
+        // 详情页主要用于「职位详情关键词」过滤，没有配置关键词时一般不抓取
+        // （智联详情页单页 1.5MB 左右，逐个抓取会显著拖慢投递速度）；
+        // Boss 的活跃度过滤也依赖详情，始终抓取。
+        fetchedDetail =
+          adapter.alwaysFetchDetail ||
+          splitKeywords(config.includeDescriptionKeywords).length > 0 ||
+          splitKeywords(config.excludeDescriptionKeywords).length > 0;
+        const detail = fetchedDetail
+          ? await adapter.fetchDetail(job)
+          : null;
+        filter = applyDetailFilters(job, detail, adapter);
+      }
       if (!filter.ok) {
         state.skipped += 1;
         log("warn", `跳过【${formatJob(job)}】：${filter.reason}`);
-        // 猎聘需要额外请求详情页做关键词过滤，跳过时稍作停顿，避免请求过密。
-        if (adapter.id === "liepin") {
+        // 刚请求过详情就跳过时稍作停顿，避免详情请求过密。
+        if (fetchedDetail) {
           await sleep(randomBetween(500, 1200));
         }
         return;
       }
 
+      if (state.stopping) return;
       state.matched += 1;
 
       const result = await adapter.apply(job, applySession);
@@ -295,36 +290,32 @@
         `处理失败【${formatJob(job)}】：${error.message || error}`,
         error,
       );
+      if (error.limited) {
+        state.current = error.message || "平台限制";
+        state.stopping = true;
+        return;
+      }
       await sleepHumanDelay();
     } finally {
       renderPanel();
     }
   }
 
-  async function safeFetchJobDetail(job, adapter) {
-    try {
-      return await adapter.fetchDetail(job);
-    } catch (error) {
-      log(
-        "warn",
-        `获取详情失败，继续使用基础信息过滤【${formatJob(job)}】：${error.message || error}`,
-      );
-      return null;
-    }
-  }
-
-  function applyFilters(job, detail, adapter) {
+  function applyBasicFilters(job, adapter) {
     if (!adapter.canApply(job)) {
       return { ok: false, reason: adapter.noApplyReason || "缺少投递所需字段" };
     }
 
     if (job.contact) return { ok: false, reason: "已经沟通过或已投递" };
 
-    if (config.skipAppliedHistory && hasAppliedToday(job)) {
-      return { ok: false, reason: "今日历史中已投递" };
+    if (hasAppliedBefore(job)) {
+      return {
+        ok: false,
+        reason: `近 ${HISTORY_RETENTION_DAYS} 天投递记录中已投递`,
+      };
     }
 
-    if (config.skipHeadhunter && job.isHeadhunter) {
+    if (job.isHeadhunter) {
       return { ok: false, reason: "过滤猎头" };
     }
 
@@ -334,6 +325,10 @@
       }
     }
 
+    return { ok: true, reason: "" };
+  }
+
+  function applyDetailFilters(job, detail, adapter) {
     const platformSkip = adapter.shouldSkip?.(job, detail);
     if (platformSkip?.skip) {
       return { ok: false, reason: platformSkip.reason };

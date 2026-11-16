@@ -45,7 +45,7 @@
   }
 
   async function sleepHumanDelay() {
-    const seconds = randomBetween(config.delayMinSec, config.delayMaxSec);
+    const seconds = randomBetween(DELAY_MIN_SEC, DELAY_MAX_SEC);
     await sleep(seconds * 1000);
   }
 
@@ -125,7 +125,9 @@
           // ignore
         }
       }
-      const style = window.getComputedStyle(element);
+      // 元素可能来自同源 iframe，需要用它所在窗口计算样式。
+      const view = element.ownerDocument?.defaultView || window;
+      const style = view.getComputedStyle(element);
       return (
         style.display !== "none" &&
         style.visibility !== "hidden" &&
@@ -146,7 +148,8 @@
     );
   }
 
-  function hasVisibleLoginSurface() {
+  function hasVisibleLoginSurface(doc = document) {
+    if (!doc) return false;
     const selectors = [
       "iframe[src*='passport']",
       "iframe[src*='login']",
@@ -160,7 +163,7 @@
       ".job-list-login-gate__btn",
     ];
     return selectors.some((selector) =>
-      Array.from(document.querySelectorAll(selector)).some(isElementVisible),
+      Array.from(doc.querySelectorAll(selector)).some(isElementVisible),
     );
   }
 
@@ -288,11 +291,11 @@
     return visible.length ? visible : result;
   }
 
-  function collectVisibleText(selectors, extraFilter) {
+  function collectVisibleText(selectors, extraFilter, doc = document) {
     const roots = [];
     const seenText = new Set();
     for (const selector of selectors) {
-      for (const element of document.querySelectorAll(selector)) {
+      for (const element of doc.querySelectorAll(selector)) {
         if (!isElementVisible(element)) continue;
         const text = normalizeText(
           element.innerText || element.textContent || "",
@@ -389,4 +392,52 @@
     return /完善简历|创建简历|上传简历|简历.*(不完整|未通过)|附件.*(未通过|异常)|请选择简历/.test(
       normalized,
     );
+  }
+
+  // Boss/猎聘/智联共用：优先滚动站内列表容器，再滚动整个页面。
+  async function scrollForMoreJobs(label) {
+    const scrollContainer = [
+      ".job-list-container",
+      ".job-list",
+      ".recommend-job-list",
+      ".job-recommend-result",
+      ".recommend-result-inner",
+      ".page-job-inner",
+      // 智联新版拆分/内部滚动布局
+      "[class*='jobs-list-sort-scroll']",
+      "[class*='job-sort-scroll']",
+      "[class*='job-list-panel']",
+      "[class*='job-split-layout']",
+      "[class*='joblist-box']",
+    ]
+      .map((selector) => document.querySelector(selector))
+      .find(Boolean);
+
+    if (scrollContainer) {
+      const before = scrollContainer.scrollTop + scrollContainer.clientHeight;
+      scrollContainer.scrollTo({
+        top: scrollContainer.scrollHeight,
+        behavior: "smooth",
+      });
+      await sleep(1000);
+      const after = scrollContainer.scrollTop + scrollContainer.clientHeight;
+      if (after > before + 20) {
+        log("debug", `${label} 已滚动职位列表加载更多`);
+        return true;
+      }
+    }
+
+    const pageBefore = window.scrollY + window.innerHeight;
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: "smooth",
+    });
+    await sleep(1000);
+    const pageAfter = window.scrollY + window.innerHeight;
+    if (pageAfter > pageBefore + 20) {
+      log("debug", `${label} 已滚动页面加载更多`);
+      return true;
+    }
+
+    return false;
   }

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Boss/猎聘/智联/前程无忧 自动投递助手
 // @namespace    https://github.com/ultraplan-bit/boss-auto-apply
-// @version      0.2.7
-// @description  在 Boss 直聘、猎聘、智联招聘、前程无忧的职位列表页按筛选规则自动批量投递（基于 muyuniao 原脚本二次开发）。
+// @version      0.2.8
+// @description  在 Boss 直聘、猎聘、智联招聘、前程无忧、实习僧的职位列表页按筛选规则自动批量投递（基于 muyuniao 原脚本二次开发）。
 // @author       plove
 // @homepageURL  https://github.com/ultraplan-bit/boss-auto-apply
 // @supportURL   https://github.com/ultraplan-bit/boss-auto-apply/issues
@@ -12,9 +12,6 @@
 // @match        https://www.zhipin.com/web/geek/job-recommend*
 // @match        https://www.zhipin.com/web/geek/overseas*
 // @match        https://www.liepin.com/zhaopin*
-// @match        https://sou.zhaopin.com/*
-// @match        https://www.zhaopin.com/sou*
-// @match        https://www.zhaopin.com/jobs*
 // @match        https://*.zhaopin.com/*
 // @match        https://we.51job.com/pc/search*
 // @match        https://www.shixiseng.com/interns*
@@ -38,21 +35,20 @@
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.7";
+  const VERSION = "0.2.8";
+
+  // 防风控的固定参数，不开放给面板配置。
+  const DAILY_LIMIT = 150;
+  const DELAY_MIN_SEC = 4;
+  const DELAY_MAX_SEC = 10;
+  const PAGE_DELAY_SEC = 3;
+  const BOSS_ACTIVE_WITHIN_DAYS = 14;
+  // 投递记录保留天数，跨天也不会重复投递同一职位。
+  const HISTORY_RETENTION_DAYS = 30;
 
   const DEFAULT_CONFIG = {
-    autoNextPage: true,
-    fetchDetail: true,
     debug: false,
-    skipAppliedHistory: true,
-    skipHeadhunter: true,
     onlyOnlineBoss: false,
-    maxApplyCount: 9999,
-    dailyLimit: 150,
-    delayMinSec: 4,
-    delayMaxSec: 10,
-    pageDelaySec: 3,
-    activeWithinDays: 14,
     includeDescriptionKeywords: "",
     excludeDescriptionKeywords: "",
     shixisengResume: "",
@@ -71,14 +67,6 @@
       ".job-card-box",
       ".job-list-box .job-card-body",
       ".rec-job-list .job-card-wrapper",
-    ],
-    scrollContainers: [
-      ".job-list-container",
-      ".job-list",
-      ".recommend-job-list",
-      ".job-recommend-result",
-      ".recommend-result-inner",
-      ".page-job-inner",
     ],
     nextIcon: ".ui-icon-arrow-right",
   };
@@ -226,6 +214,8 @@
       getCards: getBossJobCardElements,
       buildJob: buildBossJobDetail,
       fetchDetail: fetchBossJobDetail,
+      // 活跃度和“已沟通”过滤依赖详情接口，即使没配置关键词也要抓取。
+      alwaysFetchDetail: true,
       apply: applyBossJob,
       nextPage: goBossNextPageOrScroll,
       canApply: (job) =>
@@ -327,8 +317,8 @@
   function getDailyLimit(adapter = getAdapter()) {
     const platformLimit = adapter ? PLATFORM_DAILY_LIMITS[adapter.id] : null;
     return Number.isFinite(platformLimit)
-      ? Math.min(config.dailyLimit, platformLimit)
-      : config.dailyLimit;
+      ? Math.min(DAILY_LIMIT, platformLimit)
+      : DAILY_LIMIT;
   }
 
   function isSupportedListPage() {
@@ -380,27 +370,16 @@
   }
 
   function loadConfig() {
-    const stored = gmGet(CONFIG_KEY, {});
-    return normalizeConfig({ ...DEFAULT_CONFIG, ...(stored || {}) });
+    return normalizeConfig(gmGet(CONFIG_KEY, {}));
   }
 
+  // 只保留当前支持的配置项，旧版本遗留的字段会被丢弃。
   function normalizeConfig(input) {
-    const output = { ...DEFAULT_CONFIG, ...(input || {}) };
-
-    // 强行锁死固定参数，忽略存储的旧数据
-    output.maxApplyCount = DEFAULT_CONFIG.maxApplyCount;
-    output.dailyLimit = DEFAULT_CONFIG.dailyLimit;
-    output.delayMinSec = DEFAULT_CONFIG.delayMinSec;
-    output.delayMaxSec = DEFAULT_CONFIG.delayMaxSec;
-    output.pageDelaySec = DEFAULT_CONFIG.pageDelaySec;
-    output.activeWithinDays = DEFAULT_CONFIG.activeWithinDays;
-
-    // 强制锁定默认开启的配置
-    output.autoNextPage = true;
-    output.fetchDetail = true;
-    output.skipAppliedHistory = true;
-    output.skipHeadhunter = true;
-
+    const output = {};
+    for (const [key, fallback] of Object.entries(DEFAULT_CONFIG)) {
+      const value = input?.[key];
+      output[key] = typeof value === typeof fallback ? value : fallback;
+    }
     return output;
   }
 
@@ -412,24 +391,52 @@
     }
   }
 
-  function getToday() {
-    const date = new Date();
+  function formatDate(date) {
     const year = date.getFullYear();
     const month = `${date.getMonth() + 1}`.padStart(2, "0");
     const day = `${date.getDate()}`.padStart(2, "0");
     return `${year}-${month}-${day}`;
   }
 
+  function getToday() {
+    return formatDate(new Date());
+  }
+
+  // 结构：{ date, dailyCount, applied: { 职位 key: 投递日期 } }。
+  // 旧版只记录当天的 appliedKeys，读取时按其 date 迁移。
   function loadHistory() {
     const today = getToday();
-    const history = gmGet(getHistoryKey(), null) || {};
-    if (history.date !== today) {
-      return { date: today, dailyCount: 0, appliedKeys: [] };
+    const stored = gmGet(getHistoryKey(), null) || {};
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - HISTORY_RETENTION_DAYS);
+    const cutoff = formatDate(cutoffDate);
+
+    const applied = {};
+    const entries = [
+      ...Object.entries(stored.applied || {}),
+      ...(Array.isArray(stored.appliedKeys)
+        ? stored.appliedKeys.map((key) => [key, stored.date])
+        : []),
+    ];
+    for (let [key, date] of entries) {
+      if (typeof date !== "string" || date <= cutoff) continue;
+      // Boss 旧 key：securityId|encryptJobId|lid|jobName|brandName。
+      if (getPlatformId() === "boss") {
+        const fields = key.split("|");
+        if (fields.length >= 5 && fields[1]) key = `boss|${fields[1]}`;
+      }
+      if (!applied[key] || date > applied[key]) applied[key] = date;
     }
-    if (!Array.isArray(history.appliedKeys)) history.appliedKeys = [];
-    if (!Number.isFinite(Number(history.dailyCount)))
-      history.dailyCount = history.appliedKeys.length;
-    return history;
+
+    let dailyCount = 0;
+    if (stored.date === today) {
+      dailyCount = Number(stored.dailyCount);
+      if (!Number.isFinite(dailyCount)) {
+        dailyCount = Object.values(applied).filter((date) => date === today)
+          .length;
+      }
+    }
+    return { date: today, dailyCount, applied };
   }
 
   function saveHistory(history) {
@@ -439,17 +446,13 @@
   function recordApplied(job) {
     const history = loadHistory();
     const key = getJobUniqueKey(job);
-    if (!history.appliedKeys.includes(key)) history.appliedKeys.push(key);
-    history.dailyCount = Math.max(
-      Number(history.dailyCount) || 0,
-      history.appliedKeys.length,
-    );
+    if (history.applied[key] !== history.date) history.dailyCount += 1;
+    history.applied[key] = history.date;
     saveHistory(history);
   }
 
-  function hasAppliedToday(job) {
-    const history = loadHistory();
-    return history.appliedKeys.includes(getJobUniqueKey(job));
+  function hasAppliedBefore(job) {
+    return Boolean(loadHistory().applied[getJobUniqueKey(job)]);
   }
 
   // =====================================================================
@@ -541,7 +544,7 @@
   }
 
   async function sleepHumanDelay() {
-    const seconds = randomBetween(config.delayMinSec, config.delayMaxSec);
+    const seconds = randomBetween(DELAY_MIN_SEC, DELAY_MAX_SEC);
     await sleep(seconds * 1000);
   }
 
@@ -621,7 +624,9 @@
           // ignore
         }
       }
-      const style = window.getComputedStyle(element);
+      // 元素可能来自同源 iframe，需要用它所在窗口计算样式。
+      const view = element.ownerDocument?.defaultView || window;
+      const style = view.getComputedStyle(element);
       return (
         style.display !== "none" &&
         style.visibility !== "hidden" &&
@@ -642,7 +647,8 @@
     );
   }
 
-  function hasVisibleLoginSurface() {
+  function hasVisibleLoginSurface(doc = document) {
+    if (!doc) return false;
     const selectors = [
       "iframe[src*='passport']",
       "iframe[src*='login']",
@@ -656,7 +662,7 @@
       ".job-list-login-gate__btn",
     ];
     return selectors.some((selector) =>
-      Array.from(document.querySelectorAll(selector)).some(isElementVisible),
+      Array.from(doc.querySelectorAll(selector)).some(isElementVisible),
     );
   }
 
@@ -784,11 +790,11 @@
     return visible.length ? visible : result;
   }
 
-  function collectVisibleText(selectors, extraFilter) {
+  function collectVisibleText(selectors, extraFilter, doc = document) {
     const roots = [];
     const seenText = new Set();
     for (const selector of selectors) {
-      for (const element of document.querySelectorAll(selector)) {
+      for (const element of doc.querySelectorAll(selector)) {
         if (!isElementVisible(element)) continue;
         const text = normalizeText(
           element.innerText || element.textContent || "",
@@ -885,6 +891,54 @@
     return /完善简历|创建简历|上传简历|简历.*(不完整|未通过)|附件.*(未通过|异常)|请选择简历/.test(
       normalized,
     );
+  }
+
+  // Boss/猎聘/智联共用：优先滚动站内列表容器，再滚动整个页面。
+  async function scrollForMoreJobs(label) {
+    const scrollContainer = [
+      ".job-list-container",
+      ".job-list",
+      ".recommend-job-list",
+      ".job-recommend-result",
+      ".recommend-result-inner",
+      ".page-job-inner",
+      // 智联新版拆分/内部滚动布局
+      "[class*='jobs-list-sort-scroll']",
+      "[class*='job-sort-scroll']",
+      "[class*='job-list-panel']",
+      "[class*='job-split-layout']",
+      "[class*='joblist-box']",
+    ]
+      .map((selector) => document.querySelector(selector))
+      .find(Boolean);
+
+    if (scrollContainer) {
+      const before = scrollContainer.scrollTop + scrollContainer.clientHeight;
+      scrollContainer.scrollTo({
+        top: scrollContainer.scrollHeight,
+        behavior: "smooth",
+      });
+      await sleep(1000);
+      const after = scrollContainer.scrollTop + scrollContainer.clientHeight;
+      if (after > before + 20) {
+        log("debug", `${label} 已滚动职位列表加载更多`);
+        return true;
+      }
+    }
+
+    const pageBefore = window.scrollY + window.innerHeight;
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: "smooth",
+    });
+    await sleep(1000);
+    const pageAfter = window.scrollY + window.innerHeight;
+    if (pageAfter > pageBefore + 20) {
+      log("debug", `${label} 已滚动页面加载更多`);
+      return true;
+    }
+
+    return false;
   }
 
   // =====================================================================
@@ -1089,9 +1143,13 @@
       .replace(/'/g, "&#039;");
   }
 
+  // 面板骨架和表单只渲染一次；运行中只更新状态、统计和日志，
+  // 避免整块重绘打断正在输入的关键词。
   function renderPanel() {
     if (!cachedPanel) return;
     const adapter = getAdapter();
+    if (!cachedPanel.firstElementChild) renderPanelSkeleton(adapter);
+
     const history = loadHistory();
     cachedPanel.classList.toggle("is-collapsed", state.collapsed);
     const runningText = state.running
@@ -1112,9 +1170,61 @@
         )
         .join("")
       : '<div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>';
+
+    const part = (selector) => cachedPanel.querySelector(selector);
+    part('[data-role="subtitle"]').textContent =
+      `v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}`;
+    part('[data-action="toggle-collapse"]').textContent = state.collapsed
+      ? "展开"
+      : "收起";
+    part('[data-role="stats"]').innerHTML = [
+      [state.scanned, "扫描"],
+      [state.matched, "匹配"],
+      [state.applied, "成功"],
+      [state.skipped, "跳过"],
+      [state.failed, "失败"],
+    ]
+      .map(
+        ([value, label]) =>
+          `<div class="aj-stat"><b>${value}</b><span>${label}</span></div>`,
+      )
+      .join("");
+    part('[data-role="current"]').textContent = `当前：${state.current}`;
+    part('[data-action="start"]').disabled = state.running;
+    part('[data-action="stop"]').disabled = !state.running;
+    part('[data-role="logs"]').innerHTML = logsHtml;
+  }
+
+  function renderPanelSkeleton(adapter) {
     const title = adapter ? `${adapter.label} 自动投递助手` : "自动投递助手";
+    cachedPanel.innerHTML = `
+      <div class="aj-header">
+        <div>
+          <div class="aj-title">${htmlEscape(title)}</div>
+          <div class="aj-subtitle" data-role="subtitle"></div>
+        </div>
+        <button class="aj-icon-btn" data-action="toggle-collapse"></button>
+      </div>
+      <div class="aj-body">
+        <div class="aj-status" data-role="stats"></div>
+        <div class="aj-current" data-role="current"></div>
+        <form class="aj-form" data-role="config-form"></form>
+        <div class="aj-actions">
+          <button class="aj-btn aj-btn-primary" data-action="start">开始</button>
+          <button class="aj-btn aj-btn-danger" data-action="stop">停止</button>
+        </div>
+        <div class="aj-logs" data-role="logs"></div>
+      </div>
+    `;
+    renderConfigForm();
+  }
+
+  function renderConfigForm() {
+    const form = cachedPanel?.querySelector('[data-role="config-form"]');
+    if (!form) return;
+    const adapter = getAdapter();
     const onlineLabel = adapter?.onlineLabel || "仅在线 BOSS";
-    // 猎聘招呼语只在猎聘页面显示，避免影响另外两个平台的面板。
+    // 平台专属设置只在对应平台显示，避免影响其它平台的面板。
     const liepinGreetingField =
       adapter?.id === "liepin"
         ? textAreaHtml("liepinGreeting", "猎聘招呼语（未自动发送时补发）")
@@ -1124,40 +1234,16 @@
     const shixisengSettings =
       adapter?.id === "shixiseng" ? renderShixisengSettings() : "";
 
-    cachedPanel.innerHTML = `
-      <div class="aj-header">
-        <div>
-          <div class="aj-title">${htmlEscape(title)}</div>
-          <div class="aj-subtitle">v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}</div>
-        </div>
-        <button class="aj-icon-btn" data-action="toggle-collapse">${state.collapsed ? "展开" : "收起"}</button>
+    form.innerHTML = `
+      <div class="aj-checks">
+        ${checkboxHtml("onlyOnlineBoss", onlineLabel)}
+        ${checkboxHtml("debug", "调试日志")}
       </div>
-      <div class="aj-body">
-        <div class="aj-status">
-          <div class="aj-stat"><b>${state.scanned}</b><span>扫描</span></div>
-          <div class="aj-stat"><b>${state.matched}</b><span>匹配</span></div>
-          <div class="aj-stat"><b>${state.applied}</b><span>成功</span></div>
-          <div class="aj-stat"><b>${state.skipped}</b><span>跳过</span></div>
-          <div class="aj-stat"><b>${state.failed}</b><span>失败</span></div>
-        </div>
-        <div class="aj-current">当前：${htmlEscape(state.current)}</div>
-        <form class="aj-form" data-role="config-form">
-          <div class="aj-checks">
-            ${checkboxHtml("onlyOnlineBoss", onlineLabel)}
-            ${checkboxHtml("debug", "调试日志")}
-          </div>
-          ${textAreaHtml("includeDescriptionKeywords", "岗位详情包含关键词")}
-          ${textAreaHtml("excludeDescriptionKeywords", "岗位详情排除关键词")}
-          ${liepinGreetingField}
-          ${bossImageResumeSettings}
-          ${shixisengSettings}
-        </form>
-        <div class="aj-actions">
-          <button class="aj-btn aj-btn-primary" data-action="start" ${state.running ? "disabled" : ""}>开始</button>
-          <button class="aj-btn aj-btn-danger" data-action="stop" ${state.running ? "" : "disabled"}>停止</button>
-        </div>
-        <div class="aj-logs">${logsHtml}</div>
-      </div>
+      ${textAreaHtml("includeDescriptionKeywords", "岗位详情包含关键词")}
+      ${textAreaHtml("excludeDescriptionKeywords", "岗位详情排除关键词")}
+      ${liepinGreetingField}
+      ${bossImageResumeSettings}
+      ${shixisengSettings}
     `;
   }
 
@@ -1276,8 +1362,7 @@
         return;
       }
       state.bossResumeImage = file;
-      const name = cachedPanel.querySelector('[data-role="boss-resume-image-name"]');
-      if (name) name.textContent = file?.name || "请选择图片简历（仅在当前页面有效）";
+      renderConfigForm();
       return;
     }
     saveConfig(collectFormConfig(), true);
@@ -1294,7 +1379,7 @@
 
     if (action === "clear-boss-resume") {
       state.bossResumeImage = null;
-      renderPanel();
+      renderConfigForm();
       return;
     }
 
@@ -1327,7 +1412,7 @@
 
   function getJobUniqueKey(job) {
     if (job?.key) return job.key;
-    // Boss 保持原有 key 结构，兼容历史记录。
+    // 各平台通常自带 key；缺少职位 ID 时退回用可读字段拼接。
     return [
       job.securityId,
       job.encryptJobId,
@@ -1454,10 +1539,6 @@
 
       for (const job of jobs) {
         if (state.stopping) break;
-        if (state.applied >= config.maxApplyCount) {
-          state.current = "达到单次上限";
-          return;
-        }
 
         const history = loadHistory();
         if (history.dailyCount >= getDailyLimit(adapter)) {
@@ -1471,14 +1552,6 @@
       }
 
       if (state.stopping) break;
-      if (state.applied >= config.maxApplyCount) {
-        state.current = "达到单次上限";
-        return;
-      }
-      if (!config.autoNextPage) {
-        state.current = "当前页处理完成（未开启自动翻页）";
-        return;
-      }
 
       const moved = await adapter.nextPage();
       if (!moved) {
@@ -1488,7 +1561,7 @@
 
       saveResumeState({ phase: "pagination" });
       pageRound += 1;
-      await sleep(config.pageDelaySec * 1000);
+      await sleep(PAGE_DELAY_SEC * 1000);
     }
 
     // 平台限额/登录风控也会设置 stopping，保留其具体原因，不要覆盖成“手动停止”。
@@ -1533,26 +1606,33 @@
     renderPanel();
 
     try {
-      // 详情页只用于「职位详情关键词」过滤；没有配置关键词时没必要抓取
-      // （智联详情页单页 1.5MB 左右，逐个抓取会显著拖慢投递速度；前程无忧已从列表数据读取 JD）。
-      const needJobDetail =
-        config.fetchDetail &&
-        (splitKeywords(config.includeDescriptionKeywords).length > 0 ||
-          splitKeywords(config.excludeDescriptionKeywords).length > 0);
-      const detail = needJobDetail
-        ? await safeFetchJobDetail(job, adapter)
-        : null;
-      const filter = applyFilters(job, detail, adapter);
+      // 先做不需要网络的过滤，避免为注定跳过的职位请求详情。
+      let filter = applyBasicFilters(job, adapter);
+      let fetchedDetail = false;
+      if (filter.ok) {
+        // 详情页主要用于「职位详情关键词」过滤，没有配置关键词时一般不抓取
+        // （智联详情页单页 1.5MB 左右，逐个抓取会显著拖慢投递速度）；
+        // Boss 的活跃度过滤也依赖详情，始终抓取。
+        fetchedDetail =
+          adapter.alwaysFetchDetail ||
+          splitKeywords(config.includeDescriptionKeywords).length > 0 ||
+          splitKeywords(config.excludeDescriptionKeywords).length > 0;
+        const detail = fetchedDetail
+          ? await adapter.fetchDetail(job)
+          : null;
+        filter = applyDetailFilters(job, detail, adapter);
+      }
       if (!filter.ok) {
         state.skipped += 1;
         log("warn", `跳过【${formatJob(job)}】：${filter.reason}`);
-        // 猎聘需要额外请求详情页做关键词过滤，跳过时稍作停顿，避免请求过密。
-        if (adapter.id === "liepin") {
+        // 刚请求过详情就跳过时稍作停顿，避免详情请求过密。
+        if (fetchedDetail) {
           await sleep(randomBetween(500, 1200));
         }
         return;
       }
 
+      if (state.stopping) return;
       state.matched += 1;
 
       const result = await adapter.apply(job, applySession);
@@ -1618,36 +1698,32 @@
         `处理失败【${formatJob(job)}】：${error.message || error}`,
         error,
       );
+      if (error.limited) {
+        state.current = error.message || "平台限制";
+        state.stopping = true;
+        return;
+      }
       await sleepHumanDelay();
     } finally {
       renderPanel();
     }
   }
 
-  async function safeFetchJobDetail(job, adapter) {
-    try {
-      return await adapter.fetchDetail(job);
-    } catch (error) {
-      log(
-        "warn",
-        `获取详情失败，继续使用基础信息过滤【${formatJob(job)}】：${error.message || error}`,
-      );
-      return null;
-    }
-  }
-
-  function applyFilters(job, detail, adapter) {
+  function applyBasicFilters(job, adapter) {
     if (!adapter.canApply(job)) {
       return { ok: false, reason: adapter.noApplyReason || "缺少投递所需字段" };
     }
 
     if (job.contact) return { ok: false, reason: "已经沟通过或已投递" };
 
-    if (config.skipAppliedHistory && hasAppliedToday(job)) {
-      return { ok: false, reason: "今日历史中已投递" };
+    if (hasAppliedBefore(job)) {
+      return {
+        ok: false,
+        reason: `近 ${HISTORY_RETENTION_DAYS} 天投递记录中已投递`,
+      };
     }
 
-    if (config.skipHeadhunter && job.isHeadhunter) {
+    if (job.isHeadhunter) {
       return { ok: false, reason: "过滤猎头" };
     }
 
@@ -1657,6 +1733,10 @@
       }
     }
 
+    return { ok: true, reason: "" };
+  }
+
+  function applyDetailFilters(job, detail, adapter) {
     const platformSkip = adapter.shouldSkip?.(job, detail);
     if (platformSkip?.skip) {
       return { ok: false, reason: platformSkip.reason };
@@ -1797,6 +1877,8 @@
       /猎头/.test(job.rawText);
     job.recruiterOnline =
       job.bossOnline === true || /在线/.test(job.rawText);
+    // lid 随每次搜索变化，用 encryptJobId 作为跨天稳定的去重 key。
+    if (job.encryptJobId) job.key = `boss|${job.encryptJobId}`;
 
     if (!job.jobName && !job.brandName && !job.securityId) return null;
     return job;
@@ -1877,25 +1959,36 @@
     );
     const data = await parseResponse(response);
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      throw Object.assign(new Error(`HTTP ${response.status}`), {
+        limited: [401, 403, 429].includes(response.status),
+      });
+    }
     if (
       data &&
       typeof data === "object" &&
       data.code !== undefined &&
       data.code !== 0
     ) {
-      throw new Error(data.message || `接口返回 code=${data.code}`);
+      throw Object.assign(new Error(data.message || `接口返回 code=${data.code}`), {
+        limited: isHardLimitMessage(extractBossMessage(data)),
+      });
     }
 
     return data?.zpData?.jobCard || data?.zpData || data?.data || null;
   }
 
   function bossShouldSkip(_job, detail) {
-    if (config.activeWithinDays > 0 && detail?.activeTimeDesc) {
-      const activeDays = parseActiveDays(detail.activeTimeDesc);
-      if (Number.isFinite(activeDays) && activeDays > config.activeWithinDays) {
-        return { skip: true, reason: "boss活跃度未达标,已过滤" };
-      }
+    const activeDays = detail?.activeTimeDesc
+      ? parseActiveDays(detail.activeTimeDesc)
+      : Number.POSITIVE_INFINITY;
+    if (activeDays > BOSS_ACTIVE_WITHIN_DAYS) {
+      return {
+        skip: true,
+        reason: Number.isFinite(activeDays)
+          ? "boss活跃度未达标,已过滤"
+          : "无法确认boss活跃度,已过滤",
+      };
     }
 
     if (detail?.friendStatus === 1 || detail?.friendStatus === "1") {
@@ -1930,7 +2023,12 @@
     return Number.POSITIVE_INFINITY;
   }
 
-  async function applyBossJob(job, extraParams = {}) {
+  function applyBossJob(job) {
+    return addBossFriend(job);
+  }
+
+  // extraParams 仅用于确认开聊提醒后带 cid 重新发起沟通。
+  async function addBossFriend(job, extraParams = {}) {
     const params = new URLSearchParams({
       securityId: job.securityId,
       jobId: job.encryptJobId,
@@ -2011,7 +2109,7 @@
           }),
         }).catch(() => {});
         await sleep(randomBetween(1000, 2000));
-        const confirmed = await applyBossJob(job, { cid: 1 });
+        const confirmed = await addBossFriend(job, { cid: 1 });
         return confirmed.ok
           ? { ...confirmed, remainingQuota: remainingQuota - 1 }
           : confirmed;
@@ -2205,7 +2303,10 @@
     try {
       return JSON.parse(text);
     } catch (error) {
-      return { code: response.ok ? 0 : response.status, message: text };
+      return {
+        code: -1,
+        message: `接口返回非 JSON 响应（HTTP ${response.status}），无法确认投递结果`,
+      };
     }
   }
 
@@ -2313,53 +2414,6 @@
     ) {
       nextButton.click();
       log("debug", "已点击下一页");
-      return true;
-    }
-
-    return false;
-  }
-
-  async function scrollForMoreJobs(label) {
-    const scrollContainer = [
-      ".job-list-container",
-      ".job-list",
-      ".recommend-job-list",
-      ".job-recommend-result",
-      ".recommend-result-inner",
-      ".page-job-inner",
-      // 智联新版拆分/内部滚动布局
-      "[class*='jobs-list-sort-scroll']",
-      "[class*='job-sort-scroll']",
-      "[class*='job-list-panel']",
-      "[class*='job-split-layout']",
-      "[class*='joblist-box']",
-    ]
-      .map((selector) => document.querySelector(selector))
-      .find(Boolean);
-
-    if (scrollContainer) {
-      const before = scrollContainer.scrollTop + scrollContainer.clientHeight;
-      scrollContainer.scrollTo({
-        top: scrollContainer.scrollHeight,
-        behavior: "smooth",
-      });
-      await sleep(1000);
-      const after = scrollContainer.scrollTop + scrollContainer.clientHeight;
-      if (after > before + 20) {
-        log("debug", `${label} 已滚动职位列表加载更多`);
-        return true;
-      }
-    }
-
-    const pageBefore = window.scrollY + window.innerHeight;
-    window.scrollTo({
-      top: document.documentElement.scrollHeight,
-      behavior: "smooth",
-    });
-    await sleep(1000);
-    const pageAfter = window.scrollY + window.innerHeight;
-    if (pageAfter > pageBefore + 20) {
-      log("debug", `${label} 已滚动页面加载更多`);
       return true;
     }
 
@@ -2904,7 +2958,7 @@
 
   function isLiepinChatEditorCandidate(element, doc) {
     if (!element || !doc) return false;
-    if (!isElementVisibleInDocument(element, doc)) return false;
+    if (!isElementVisible(element)) return false;
     if (element.disabled || element.readOnly) return false;
     const hint = `${element.getAttribute("placeholder") || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("type") || ""}`;
     if (/搜索|查找|搜索联系人|search/i.test(hint)) return false;
@@ -2970,7 +3024,7 @@
       )
         .filter(
           (element) =>
-            isElementVisibleInDocument(element, widgetDoc) &&
+            isElementVisible(element) &&
             !String(element.className).includes("im-ui-basic-entry"),
         )
         .slice(0, 6)
@@ -3024,7 +3078,7 @@
 
     const inspectFrame = (frame, insideIm) => {
       if (!frame) return;
-      if (!isElementVisibleInDocument(frame, documentOf(frame))) return;
+      if (!isElementVisible(frame)) return;
 
       const hint = [
         frame.getAttribute("src") || "",
@@ -3127,6 +3181,7 @@
   }
 
   function liepinWidgetMatchesJob(widget, job) {
+    // ponytail: 标题名称匹配仍是启发式，站点提供稳定招聘者 ID 时改用 ID。
     if (!widget || !job || !widget.heading) return false;
     const heading = normalizeText(widget.heading);
     const names = [job.recruiterName, job.brandName, job.jobName]
@@ -3154,17 +3209,12 @@
         widgets.push(widget);
       }
     }
-    const targets = widgets.filter((widget) =>
-      isNewLiepinConversation(widget, liepinImSnapshot.get(widget.editor)),
+    const targets = widgets.filter(
+      (widget) =>
+        isNewLiepinConversation(widget, liepinImSnapshot.get(widget.editor)) &&
+        liepinWidgetMatchesJob(widget, job),
     );
-
-    if (targets.length === 1) return targets[0];
-    if (targets.length > 1) {
-      // 多个候选时只接受能明确匹配本岗位招聘者/公司名的那个；
-      // 无法唯一确定时拒绝猜测，避免把招呼语发给错误的招聘者。
-      return targets.find((widget) => liepinWidgetMatchesJob(widget, job)) || null;
-    }
-    return null;
+    return targets.length === 1 ? targets[0] : null;
   }
 
   async function waitForNewLiepinImWidgetInDocument(
@@ -3202,7 +3252,7 @@
 
       if (
         isLoginOrVerifyText(feedbackText) ||
-        currentDocs.some((doc) => hasVisibleLoginSurfaceInDocument(doc))
+        currentDocs.some((doc) => hasVisibleLoginSurface(doc))
       ) {
         return {
           error: {
@@ -3316,7 +3366,7 @@
       'button.im-ui-basic-send-btn, [role="button"].im-ui-basic-send-btn',
     ).filter(
       (element) =>
-        isElementVisibleInDocument(element, doc) && !isDisabled(element),
+        isElementVisible(element) && !isDisabled(element),
     );
     if (official.length === 1) return official[0];
     if (official.length > 1) {
@@ -3332,7 +3382,7 @@
       'button, a, [role="button"], input[type="submit"], [class*="send"], [class*="Send"]',
     ).filter(
       (element) =>
-        isElementVisibleInDocument(element, doc) &&
+        isElementVisible(element) &&
         !isDisabled(element) &&
         /^(发送|发送消息)$/.test(label(element)),
     );
@@ -3373,14 +3423,14 @@
       ".im-ui-message-item-send, .im-ui-message-item-receive",
     );
     for (const row of rows) {
-      if (!isElementVisibleInDocument(row, doc)) continue;
+      if (!isElementVisible(row)) continue;
 
       const hint = `${row.className} ${row.getAttribute("data-status") || ""}`;
       const hasErrorIcon = Array.from(
         row.querySelectorAll(
           '[class*="fail"], [class*="error"], [class*="loadingicon"]',
         ),
-      ).some((element) => isElementVisibleInDocument(element, doc));
+      ).some((element) => isElementVisible(element));
       if (
         hasErrorIcon ||
         /sending|pending|send-fail|send-error|message-fail|\bfailed\b/i.test(
@@ -3486,7 +3536,7 @@
 
         if (
           isLoginOrVerifyText(feedbackText) ||
-          hasVisibleLoginSurfaceInDocument(doc)
+          hasVisibleLoginSurface(doc)
         ) {
           return {
             ok: false,
@@ -3520,18 +3570,18 @@
     await sleep(1000);
 
     let state = readLiepinChatState(root, doc);
-    if (state.matching.length) {
-      return { ok: true, message: "招呼已发送" };
-    }
-    if (state.defaultOutgoing.length) {
-      return { ok: true, message: "平台已自动发送默认招呼" };
-    }
     if (state.incoming.length) {
       return {
         ok: false,
         skipped: true,
         message: "招聘方已有回复，属于此前已沟通，跳过重复打招呼",
       };
+    }
+    if (state.matching.length) {
+      return { ok: true, message: "招呼已发送" };
+    }
+    if (state.defaultOutgoing.length) {
+      return { ok: true, message: "平台已自动发送默认招呼" };
     }
     if (state.nonDefaultOutgoing.length) {
       // 刚建立的新会话里只有本人消息：通常是猎聘 App 里设置的自动招呼语
@@ -3607,12 +3657,18 @@
 
     // 点发送前再核对一次：避免平台在输入期间自动发了招呼，造成重复消息。
     state = readLiepinChatState(root, doc);
+    if (state.incoming.length) {
+      return {
+        ok: false,
+        skipped: true,
+        message: "招聘方已有回复，跳过重复打招呼",
+      };
+    }
     if (state.matching.length || state.defaultOutgoing.length) {
       return { ok: true, message: "平台已自动发送默认招呼" };
     }
-    if (state.nonDefaultOutgoing.length || state.incoming.length) {
-      // 进入会话时这两种记录都不存在；填写期间新增只可能是平台自动发出的
-      // 招呼语（或招聘方已回复），此时不应再补发，也不算重复打招呼。
+    if (state.nonDefaultOutgoing.length) {
+      // 填写期间平台自动发出了招呼语，不再补发。
       return { ok: true, message: "平台已自动发送招呼语" };
     }
     sendButton = state.sendButton || sendButton;
@@ -3698,7 +3754,7 @@
     ];
     for (const selector of closeSelectors) {
       const element = deepQueryAll(scope, selector).find((candidate) =>
-        isElementVisibleInDocument(candidate, scopeDoc),
+        isElementVisible(candidate),
       );
       if (element) {
         try {
@@ -3740,41 +3796,6 @@
     }
   }
 
-  function isElementVisibleInDocument(element, doc) {
-    if (!element || !doc || typeof element.getClientRects !== "function") {
-      return false;
-    }
-    const win = doc.defaultView;
-    if (!win) return false;
-    try {
-      if (!element.getClientRects().length) return false;
-      const rect = element.getBoundingClientRect();
-      if (rect.width < 2 && rect.height < 2) return false;
-      if (typeof element.checkVisibility === "function") {
-        try {
-          if (
-            !element.checkVisibility({
-              checkOpacity: true,
-              checkVisibilityCSS: true,
-            })
-          ) {
-            return false;
-          }
-        } catch (error) {
-          // ignore
-        }
-      }
-      const style = win.getComputedStyle(element);
-      return (
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        Number(style.opacity || 1) > 0
-      );
-    } catch (error) {
-      return false;
-    }
-  }
-
   function findLiepinDetailChatButton(doc) {
     if (!doc) return null;
     const selectors = [
@@ -3802,7 +3823,7 @@
           element.innerText || element.textContent || "",
         );
         if (!text || !isChatLabel(text)) continue;
-        if (!isElementVisibleInDocument(element, doc)) continue;
+        if (!isElementVisible(element)) continue;
         push(element, text);
       }
     }
@@ -3811,7 +3832,7 @@
         element.innerText || element.textContent || "",
       );
       if (!isChatLabel(text)) continue;
-      if (!isElementVisibleInDocument(element, doc)) continue;
+      if (!isElementVisible(element)) continue;
       push(element, text);
     }
     if (!candidates.length) return null;
@@ -3824,35 +3845,23 @@
     );
   }
 
+  // 聊天窗口本身（含输入框）不是平台提示；否则聊天内容里的
+  // “验证码/登录”等业务词会被误判成风控并中断整个投递。
+  function isLiepinChatSurface(element) {
+    return Boolean(
+      element.querySelector('textarea, [contenteditable], [role="textbox"]'),
+    );
+  }
+
   function readLiepinFeedbackFromDocument(doc) {
     if (!doc) return [];
-    const roots = [];
-    const seen = new Set();
-    for (const selector of LIEPIN_FEEDBACK_SELECTORS) {
-      for (const element of doc.querySelectorAll(selector)) {
-        if (!isElementVisibleInDocument(element, doc)) continue;
-        // 聊天窗口本身（含输入框）不是平台提示；否则聊天内容里的
-        // “验证码/登录”等业务词会被误判成风控并中断整个投递。
-        if (
-          element.querySelector(
-            'textarea, [contenteditable], [role="textbox"]',
-          )
-        ) {
-          continue;
-        }
-        const text = normalizeText(
-          element.innerText || element.textContent || "",
-        );
-        if (!text || text.length > 2000) continue;
-        if (!/沟通|投递|登录|验证|上限|会员|频繁|异常|成功|失败/.test(text)) {
-          continue;
-        }
-        if (seen.has(text)) continue;
-        seen.add(text);
-        roots.push({ element, text });
-      }
-    }
-    return roots;
+    return collectVisibleText(
+      LIEPIN_FEEDBACK_SELECTORS,
+      (text, element) =>
+        !isLiepinChatSurface(element) &&
+        /沟通|投递|登录|验证|上限|会员|频繁|异常|成功|失败/.test(text),
+      doc,
+    );
   }
 
   // 不限关键词地收集平台提示（toast/弹窗）。点击“聊一聊”后如果平台拒绝开聊，
@@ -3879,45 +3888,11 @@
       ".im-ui-toast",
       "[class*='toast']",
     ];
-    const notices = [];
-    const seen = new Set();
-    for (const selector of selectors) {
-      for (const element of doc.querySelectorAll(selector)) {
-        if (!isElementVisibleInDocument(element, doc)) continue;
-        // 聊天窗口本身（含输入框）不是提示。
-        if (
-          element.querySelector(
-            'textarea, [contenteditable], [role="textbox"]',
-          )
-        ) {
-          continue;
-        }
-        const text = normalizeText(
-          element.innerText || element.textContent || "",
-        );
-        if (!text || text.length > 500 || seen.has(text)) continue;
-        seen.add(text);
-        notices.push(text);
-      }
-    }
-    return notices;
-  }
-
-  function hasVisibleLoginSurfaceInDocument(doc) {
-    if (!doc) return false;
-    const selectors = [
-      "iframe[src*='passport']",
-      ".passport-login",
-      ".login-dialog",
-      ".login-modal",
-      "#loginname",
-      ".login-submit-btn",
-    ];
-    return selectors.some((selector) =>
-      Array.from(doc.querySelectorAll(selector)).some((element) =>
-        isElementVisibleInDocument(element, doc),
-      ),
-    );
+    return collectVisibleText(
+      selectors,
+      (text, element) => text.length <= 500 && !isLiepinChatSurface(element),
+      doc,
+    ).map((item) => item.text);
   }
 
   async function applyLiepinViaDetailFrame(job) {
@@ -4001,7 +3976,7 @@
         // 外部网申职位只有 apply-ats 入口，没有聊一聊，直接跳过。
         const externalApply = Array.from(
           doc.querySelectorAll('[data-selector="apply-ats"]'),
-        ).find((element) => isElementVisibleInDocument(element, doc));
+        ).find((element) => isElementVisible(element));
         if (externalApply) {
           cleanup();
           return {
@@ -4029,7 +4004,7 @@
           .join("；");
         if (
           isLoginOrVerifyText(feedbackText) ||
-          hasVisibleLoginSurfaceInDocument(doc)
+          hasVisibleLoginSurface(doc)
         ) {
           cleanup();
           return {
@@ -4059,7 +4034,7 @@
               ),
             ).find(
               (element) =>
-                isElementVisibleInDocument(element, finalDoc) &&
+                isElementVisible(element) &&
                 /^(已沟通|已投递|聊过了|已招满)$/.test(
                   normalizeText(element.innerText || element.textContent || ""),
                 ),
@@ -5422,8 +5397,8 @@
         }
       }
 
-      const state = getPageGlobal("__INITIAL_STATE__");
-      if (state && state.hasMore === false) return false;
+      const pageState = getPageGlobal("__INITIAL_STATE__");
+      if (pageState && pageState.hasMore === false) return false;
     }
 
     const nextLink = Array.from(
@@ -5634,15 +5609,9 @@
     if (!card || !document.contains(card)) {
       return { ok: false, message: "职位卡片已刷新，跳过" };
     }
-    if (job.expired || job.externalApply) {
-      return {
-        ok: false,
-        skipped: true,
-        message: job.expired ? "职位已下线，跳过" : "该职位需前往外部网站投递，跳过",
-      };
-    }
-    if (job.contact) {
-      return { ok: false, skipped: true, message: "职位已申请，跳过重复投递" };
+    // 外部投递和已申请职位已由 canApply / contact 在通用过滤中跳过。
+    if (job.expired) {
+      return { ok: false, skipped: true, message: "职位已下线，跳过" };
     }
 
     const button = card.querySelector(QIANCHENG_SELECTORS.applyButton);
@@ -5787,6 +5756,9 @@
     if (/login/i.test(location.href)) {
       return { ok: false, reason: "请先在浏览器里自行登录实习僧。" };
     }
+    if (!config.shixisengResume) {
+      return { ok: false, reason: "请先在面板中选择实习僧投递简历。" };
+    }
 
     const pageWindow = getPageWindow();
     const root =
@@ -5843,8 +5815,9 @@
       const textarea = document.createElement("textarea");
       textarea.innerHTML = String(value || "");
       return normalizeText(
+        // 去掉实习僧用于反爬的私有区字体字符。
         textarea.value.replace(
-          /[-\u{F0000}-\u{10FFFD}]/gu,
+          /[\uE000-\uF8FF\u{F0000}-\u{10FFFD}]/gu,
           "",
         ),
       );
@@ -5958,7 +5931,10 @@
       return { ok: false, limited: true, message: "无效职位链接，已停止投递" };
     }
 
+    const target = new URL(targetUrl);
+    let previousDoc;
     try {
+      previousDoc = session.document;
       session.location.href = targetUrl;
     } catch (error) {
       return { ok: false, limited: true, message: "无法打开实习僧职位详情页，已停止投递" };
@@ -5975,7 +5951,17 @@
       let detailDoc;
       try {
         detailDoc = session.document;
-        if (detailDoc.location.hostname !== new URL(targetUrl).hostname) {
+        // 导航未完成时仍能读到旧文档，不能用上一职位的状态判定本次结果。
+        if (
+          detailDoc === previousDoc ||
+          detailDoc.readyState === "loading" ||
+          detailDoc.location.href === "about:blank"
+        ) continue;
+        const loadedUrl = new URL(detailDoc.location.href);
+        if (
+          loadedUrl.origin !== target.origin ||
+          loadedUrl.pathname !== target.pathname
+        ) {
           return {
             ok: false,
             limited: true,
@@ -6089,24 +6075,6 @@
           return { ok: false, limited: true, message: "该职位不支持设置的每周出勤，已暂停" };
         }
         commonDeliver.days = config.shixisengDays;
-      }
-
-      if (submitClicked) {
-        if (deliveryDialog.deliverErrorMsg) {
-          const message = normalizeText(deliveryDialog.deliverErrorMsg).slice(0, 160);
-          return {
-            ok: false,
-            limited: isLimitText(message) || isLoginOrVerifyText(message),
-            message,
-          };
-        }
-        if (
-          String(detail.delivered) === "1" ||
-          deliveryDialog.deliverResult === "success"
-        ) {
-          return { ok: true, message: "实习僧已确认投递" };
-        }
-        continue;
       }
 
       if (!submitClicked) {
@@ -6255,7 +6223,9 @@
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+    document.addEventListener("DOMContentLoaded", () => bootstrap(), {
+      once: true,
+    });
   } else {
     bootstrap();
   }

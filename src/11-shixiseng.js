@@ -13,6 +13,9 @@
     if (/login/i.test(location.href)) {
       return { ok: false, reason: "请先在浏览器里自行登录实习僧。" };
     }
+    if (!config.shixisengResume) {
+      return { ok: false, reason: "请先在面板中选择实习僧投递简历。" };
+    }
 
     const pageWindow = getPageWindow();
     const root =
@@ -69,8 +72,9 @@
       const textarea = document.createElement("textarea");
       textarea.innerHTML = String(value || "");
       return normalizeText(
+        // 去掉实习僧用于反爬的私有区字体字符。
         textarea.value.replace(
-          /[-\u{F0000}-\u{10FFFD}]/gu,
+          /[\uE000-\uF8FF\u{F0000}-\u{10FFFD}]/gu,
           "",
         ),
       );
@@ -184,7 +188,10 @@
       return { ok: false, limited: true, message: "无效职位链接，已停止投递" };
     }
 
+    const target = new URL(targetUrl);
+    let previousDoc;
     try {
+      previousDoc = session.document;
       session.location.href = targetUrl;
     } catch (error) {
       return { ok: false, limited: true, message: "无法打开实习僧职位详情页，已停止投递" };
@@ -201,7 +208,17 @@
       let detailDoc;
       try {
         detailDoc = session.document;
-        if (detailDoc.location.hostname !== new URL(targetUrl).hostname) {
+        // 导航未完成时仍能读到旧文档，不能用上一职位的状态判定本次结果。
+        if (
+          detailDoc === previousDoc ||
+          detailDoc.readyState === "loading" ||
+          detailDoc.location.href === "about:blank"
+        ) continue;
+        const loadedUrl = new URL(detailDoc.location.href);
+        if (
+          loadedUrl.origin !== target.origin ||
+          loadedUrl.pathname !== target.pathname
+        ) {
           return {
             ok: false,
             limited: true,
@@ -315,24 +332,6 @@
           return { ok: false, limited: true, message: "该职位不支持设置的每周出勤，已暂停" };
         }
         commonDeliver.days = config.shixisengDays;
-      }
-
-      if (submitClicked) {
-        if (deliveryDialog.deliverErrorMsg) {
-          const message = normalizeText(deliveryDialog.deliverErrorMsg).slice(0, 160);
-          return {
-            ok: false,
-            limited: isLimitText(message) || isLoginOrVerifyText(message),
-            message,
-          };
-        }
-        if (
-          String(detail.delivered) === "1" ||
-          deliveryDialog.deliverResult === "success"
-        ) {
-          return { ok: true, message: "实习僧已确认投递" };
-        }
-        continue;
       }
 
       if (!submitClicked) {

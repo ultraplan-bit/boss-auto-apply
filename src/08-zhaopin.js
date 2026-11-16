@@ -1081,8 +1081,8 @@
         }
       }
 
-      const state = getPageGlobal("__INITIAL_STATE__");
-      if (state && state.hasMore === false) return false;
+      const pageState = getPageGlobal("__INITIAL_STATE__");
+      if (pageState && pageState.hasMore === false) return false;
     }
 
     const nextLink = Array.from(

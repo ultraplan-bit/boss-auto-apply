@@ -113,6 +113,8 @@
       /猎头/.test(job.rawText);
     job.recruiterOnline =
       job.bossOnline === true || /在线/.test(job.rawText);
+    // lid 随每次搜索变化，用 encryptJobId 作为跨天稳定的去重 key。
+    if (job.encryptJobId) job.key = `boss|${job.encryptJobId}`;
 
     if (!job.jobName && !job.brandName && !job.securityId) return null;
     return job;
@@ -193,25 +195,36 @@
     );
     const data = await parseResponse(response);
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      throw Object.assign(new Error(`HTTP ${response.status}`), {
+        limited: [401, 403, 429].includes(response.status),
+      });
+    }
     if (
       data &&
       typeof data === "object" &&
       data.code !== undefined &&
       data.code !== 0
     ) {
-      throw new Error(data.message || `接口返回 code=${data.code}`);
+      throw Object.assign(new Error(data.message || `接口返回 code=${data.code}`), {
+        limited: isHardLimitMessage(extractBossMessage(data)),
+      });
     }
 
     return data?.zpData?.jobCard || data?.zpData || data?.data || null;
   }
 
   function bossShouldSkip(_job, detail) {
-    if (config.activeWithinDays > 0 && detail?.activeTimeDesc) {
-      const activeDays = parseActiveDays(detail.activeTimeDesc);
-      if (Number.isFinite(activeDays) && activeDays > config.activeWithinDays) {
-        return { skip: true, reason: "boss活跃度未达标,已过滤" };
-      }
+    const activeDays = detail?.activeTimeDesc
+      ? parseActiveDays(detail.activeTimeDesc)
+      : Number.POSITIVE_INFINITY;
+    if (activeDays > BOSS_ACTIVE_WITHIN_DAYS) {
+      return {
+        skip: true,
+        reason: Number.isFinite(activeDays)
+          ? "boss活跃度未达标,已过滤"
+          : "无法确认boss活跃度,已过滤",
+      };
     }
 
     if (detail?.friendStatus === 1 || detail?.friendStatus === "1") {
@@ -246,7 +259,12 @@
     return Number.POSITIVE_INFINITY;
   }
 
-  async function applyBossJob(job, extraParams = {}) {
+  function applyBossJob(job) {
+    return addBossFriend(job);
+  }
+
+  // extraParams 仅用于确认开聊提醒后带 cid 重新发起沟通。
+  async function addBossFriend(job, extraParams = {}) {
     const params = new URLSearchParams({
       securityId: job.securityId,
       jobId: job.encryptJobId,
@@ -327,7 +345,7 @@
           }),
         }).catch(() => {});
         await sleep(randomBetween(1000, 2000));
-        const confirmed = await applyBossJob(job, { cid: 1 });
+        const confirmed = await addBossFriend(job, { cid: 1 });
         return confirmed.ok
           ? { ...confirmed, remainingQuota: remainingQuota - 1 }
           : confirmed;
@@ -521,7 +539,10 @@
     try {
       return JSON.parse(text);
     } catch (error) {
-      return { code: response.ok ? 0 : response.status, message: text };
+      return {
+        code: -1,
+        message: `接口返回非 JSON 响应（HTTP ${response.status}），无法确认投递结果`,
+      };
     }
   }
 
@@ -629,53 +650,6 @@
     ) {
       nextButton.click();
       log("debug", "已点击下一页");
-      return true;
-    }
-
-    return false;
-  }
-
-  async function scrollForMoreJobs(label) {
-    const scrollContainer = [
-      ".job-list-container",
-      ".job-list",
-      ".recommend-job-list",
-      ".job-recommend-result",
-      ".recommend-result-inner",
-      ".page-job-inner",
-      // 智联新版拆分/内部滚动布局
-      "[class*='jobs-list-sort-scroll']",
-      "[class*='job-sort-scroll']",
-      "[class*='job-list-panel']",
-      "[class*='job-split-layout']",
-      "[class*='joblist-box']",
-    ]
-      .map((selector) => document.querySelector(selector))
-      .find(Boolean);
-
-    if (scrollContainer) {
-      const before = scrollContainer.scrollTop + scrollContainer.clientHeight;
-      scrollContainer.scrollTo({
-        top: scrollContainer.scrollHeight,
-        behavior: "smooth",
-      });
-      await sleep(1000);
-      const after = scrollContainer.scrollTop + scrollContainer.clientHeight;
-      if (after > before + 20) {
-        log("debug", `${label} 已滚动职位列表加载更多`);
-        return true;
-      }
-    }
-
-    const pageBefore = window.scrollY + window.innerHeight;
-    window.scrollTo({
-      top: document.documentElement.scrollHeight,
-      behavior: "smooth",
-    });
-    await sleep(1000);
-    const pageAfter = window.scrollY + window.innerHeight;
-    if (pageAfter > pageBefore + 20) {
-      log("debug", `${label} 已滚动页面加载更多`);
       return true;
     }
 

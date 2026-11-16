@@ -536,7 +536,7 @@
 
   function isLiepinChatEditorCandidate(element, doc) {
     if (!element || !doc) return false;
-    if (!isElementVisibleInDocument(element, doc)) return false;
+    if (!isElementVisible(element)) return false;
     if (element.disabled || element.readOnly) return false;
     const hint = `${element.getAttribute("placeholder") || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("type") || ""}`;
     if (/搜索|查找|搜索联系人|search/i.test(hint)) return false;
@@ -602,7 +602,7 @@
       )
         .filter(
           (element) =>
-            isElementVisibleInDocument(element, widgetDoc) &&
+            isElementVisible(element) &&
             !String(element.className).includes("im-ui-basic-entry"),
         )
         .slice(0, 6)
@@ -656,7 +656,7 @@
 
     const inspectFrame = (frame, insideIm) => {
       if (!frame) return;
-      if (!isElementVisibleInDocument(frame, documentOf(frame))) return;
+      if (!isElementVisible(frame)) return;
 
       const hint = [
         frame.getAttribute("src") || "",
@@ -759,6 +759,7 @@
   }
 
   function liepinWidgetMatchesJob(widget, job) {
+    // ponytail: 标题名称匹配仍是启发式，站点提供稳定招聘者 ID 时改用 ID。
     if (!widget || !job || !widget.heading) return false;
     const heading = normalizeText(widget.heading);
     const names = [job.recruiterName, job.brandName, job.jobName]
@@ -786,17 +787,12 @@
         widgets.push(widget);
       }
     }
-    const targets = widgets.filter((widget) =>
-      isNewLiepinConversation(widget, liepinImSnapshot.get(widget.editor)),
+    const targets = widgets.filter(
+      (widget) =>
+        isNewLiepinConversation(widget, liepinImSnapshot.get(widget.editor)) &&
+        liepinWidgetMatchesJob(widget, job),
     );
-
-    if (targets.length === 1) return targets[0];
-    if (targets.length > 1) {
-      // 多个候选时只接受能明确匹配本岗位招聘者/公司名的那个；
-      // 无法唯一确定时拒绝猜测，避免把招呼语发给错误的招聘者。
-      return targets.find((widget) => liepinWidgetMatchesJob(widget, job)) || null;
-    }
-    return null;
+    return targets.length === 1 ? targets[0] : null;
   }
 
   async function waitForNewLiepinImWidgetInDocument(
@@ -834,7 +830,7 @@
 
       if (
         isLoginOrVerifyText(feedbackText) ||
-        currentDocs.some((doc) => hasVisibleLoginSurfaceInDocument(doc))
+        currentDocs.some((doc) => hasVisibleLoginSurface(doc))
       ) {
         return {
           error: {
@@ -948,7 +944,7 @@
       'button.im-ui-basic-send-btn, [role="button"].im-ui-basic-send-btn',
     ).filter(
       (element) =>
-        isElementVisibleInDocument(element, doc) && !isDisabled(element),
+        isElementVisible(element) && !isDisabled(element),
     );
     if (official.length === 1) return official[0];
     if (official.length > 1) {
@@ -964,7 +960,7 @@
       'button, a, [role="button"], input[type="submit"], [class*="send"], [class*="Send"]',
     ).filter(
       (element) =>
-        isElementVisibleInDocument(element, doc) &&
+        isElementVisible(element) &&
         !isDisabled(element) &&
         /^(发送|发送消息)$/.test(label(element)),
     );
@@ -1005,14 +1001,14 @@
       ".im-ui-message-item-send, .im-ui-message-item-receive",
     );
     for (const row of rows) {
-      if (!isElementVisibleInDocument(row, doc)) continue;
+      if (!isElementVisible(row)) continue;
 
       const hint = `${row.className} ${row.getAttribute("data-status") || ""}`;
       const hasErrorIcon = Array.from(
         row.querySelectorAll(
           '[class*="fail"], [class*="error"], [class*="loadingicon"]',
         ),
-      ).some((element) => isElementVisibleInDocument(element, doc));
+      ).some((element) => isElementVisible(element));
       if (
         hasErrorIcon ||
         /sending|pending|send-fail|send-error|message-fail|\bfailed\b/i.test(
@@ -1118,7 +1114,7 @@
 
         if (
           isLoginOrVerifyText(feedbackText) ||
-          hasVisibleLoginSurfaceInDocument(doc)
+          hasVisibleLoginSurface(doc)
         ) {
           return {
             ok: false,
@@ -1152,18 +1148,18 @@
     await sleep(1000);
 
     let state = readLiepinChatState(root, doc);
-    if (state.matching.length) {
-      return { ok: true, message: "招呼已发送" };
-    }
-    if (state.defaultOutgoing.length) {
-      return { ok: true, message: "平台已自动发送默认招呼" };
-    }
     if (state.incoming.length) {
       return {
         ok: false,
         skipped: true,
         message: "招聘方已有回复，属于此前已沟通，跳过重复打招呼",
       };
+    }
+    if (state.matching.length) {
+      return { ok: true, message: "招呼已发送" };
+    }
+    if (state.defaultOutgoing.length) {
+      return { ok: true, message: "平台已自动发送默认招呼" };
     }
     if (state.nonDefaultOutgoing.length) {
       // 刚建立的新会话里只有本人消息：通常是猎聘 App 里设置的自动招呼语
@@ -1239,12 +1235,18 @@
 
     // 点发送前再核对一次：避免平台在输入期间自动发了招呼，造成重复消息。
     state = readLiepinChatState(root, doc);
+    if (state.incoming.length) {
+      return {
+        ok: false,
+        skipped: true,
+        message: "招聘方已有回复，跳过重复打招呼",
+      };
+    }
     if (state.matching.length || state.defaultOutgoing.length) {
       return { ok: true, message: "平台已自动发送默认招呼" };
     }
-    if (state.nonDefaultOutgoing.length || state.incoming.length) {
-      // 进入会话时这两种记录都不存在；填写期间新增只可能是平台自动发出的
-      // 招呼语（或招聘方已回复），此时不应再补发，也不算重复打招呼。
+    if (state.nonDefaultOutgoing.length) {
+      // 填写期间平台自动发出了招呼语，不再补发。
       return { ok: true, message: "平台已自动发送招呼语" };
     }
     sendButton = state.sendButton || sendButton;
@@ -1330,7 +1332,7 @@
     ];
     for (const selector of closeSelectors) {
       const element = deepQueryAll(scope, selector).find((candidate) =>
-        isElementVisibleInDocument(candidate, scopeDoc),
+        isElementVisible(candidate),
       );
       if (element) {
         try {
@@ -1372,41 +1374,6 @@
     }
   }
 
-  function isElementVisibleInDocument(element, doc) {
-    if (!element || !doc || typeof element.getClientRects !== "function") {
-      return false;
-    }
-    const win = doc.defaultView;
-    if (!win) return false;
-    try {
-      if (!element.getClientRects().length) return false;
-      const rect = element.getBoundingClientRect();
-      if (rect.width < 2 && rect.height < 2) return false;
-      if (typeof element.checkVisibility === "function") {
-        try {
-          if (
-            !element.checkVisibility({
-              checkOpacity: true,
-              checkVisibilityCSS: true,
-            })
-          ) {
-            return false;
-          }
-        } catch (error) {
-          // ignore
-        }
-      }
-      const style = win.getComputedStyle(element);
-      return (
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        Number(style.opacity || 1) > 0
-      );
-    } catch (error) {
-      return false;
-    }
-  }
-
   function findLiepinDetailChatButton(doc) {
     if (!doc) return null;
     const selectors = [
@@ -1434,7 +1401,7 @@
           element.innerText || element.textContent || "",
         );
         if (!text || !isChatLabel(text)) continue;
-        if (!isElementVisibleInDocument(element, doc)) continue;
+        if (!isElementVisible(element)) continue;
         push(element, text);
       }
     }
@@ -1443,7 +1410,7 @@
         element.innerText || element.textContent || "",
       );
       if (!isChatLabel(text)) continue;
-      if (!isElementVisibleInDocument(element, doc)) continue;
+      if (!isElementVisible(element)) continue;
       push(element, text);
     }
     if (!candidates.length) return null;
@@ -1456,35 +1423,23 @@
     );
   }
 
+  // 聊天窗口本身（含输入框）不是平台提示；否则聊天内容里的
+  // “验证码/登录”等业务词会被误判成风控并中断整个投递。
+  function isLiepinChatSurface(element) {
+    return Boolean(
+      element.querySelector('textarea, [contenteditable], [role="textbox"]'),
+    );
+  }
+
   function readLiepinFeedbackFromDocument(doc) {
     if (!doc) return [];
-    const roots = [];
-    const seen = new Set();
-    for (const selector of LIEPIN_FEEDBACK_SELECTORS) {
-      for (const element of doc.querySelectorAll(selector)) {
-        if (!isElementVisibleInDocument(element, doc)) continue;
-        // 聊天窗口本身（含输入框）不是平台提示；否则聊天内容里的
-        // “验证码/登录”等业务词会被误判成风控并中断整个投递。
-        if (
-          element.querySelector(
-            'textarea, [contenteditable], [role="textbox"]',
-          )
-        ) {
-          continue;
-        }
-        const text = normalizeText(
-          element.innerText || element.textContent || "",
-        );
-        if (!text || text.length > 2000) continue;
-        if (!/沟通|投递|登录|验证|上限|会员|频繁|异常|成功|失败/.test(text)) {
-          continue;
-        }
-        if (seen.has(text)) continue;
-        seen.add(text);
-        roots.push({ element, text });
-      }
-    }
-    return roots;
+    return collectVisibleText(
+      LIEPIN_FEEDBACK_SELECTORS,
+      (text, element) =>
+        !isLiepinChatSurface(element) &&
+        /沟通|投递|登录|验证|上限|会员|频繁|异常|成功|失败/.test(text),
+      doc,
+    );
   }
 
   // 不限关键词地收集平台提示（toast/弹窗）。点击“聊一聊”后如果平台拒绝开聊，
@@ -1511,45 +1466,11 @@
       ".im-ui-toast",
       "[class*='toast']",
     ];
-    const notices = [];
-    const seen = new Set();
-    for (const selector of selectors) {
-      for (const element of doc.querySelectorAll(selector)) {
-        if (!isElementVisibleInDocument(element, doc)) continue;
-        // 聊天窗口本身（含输入框）不是提示。
-        if (
-          element.querySelector(
-            'textarea, [contenteditable], [role="textbox"]',
-          )
-        ) {
-          continue;
-        }
-        const text = normalizeText(
-          element.innerText || element.textContent || "",
-        );
-        if (!text || text.length > 500 || seen.has(text)) continue;
-        seen.add(text);
-        notices.push(text);
-      }
-    }
-    return notices;
-  }
-
-  function hasVisibleLoginSurfaceInDocument(doc) {
-    if (!doc) return false;
-    const selectors = [
-      "iframe[src*='passport']",
-      ".passport-login",
-      ".login-dialog",
-      ".login-modal",
-      "#loginname",
-      ".login-submit-btn",
-    ];
-    return selectors.some((selector) =>
-      Array.from(doc.querySelectorAll(selector)).some((element) =>
-        isElementVisibleInDocument(element, doc),
-      ),
-    );
+    return collectVisibleText(
+      selectors,
+      (text, element) => text.length <= 500 && !isLiepinChatSurface(element),
+      doc,
+    ).map((item) => item.text);
   }
 
   async function applyLiepinViaDetailFrame(job) {
@@ -1633,7 +1554,7 @@
         // 外部网申职位只有 apply-ats 入口，没有聊一聊，直接跳过。
         const externalApply = Array.from(
           doc.querySelectorAll('[data-selector="apply-ats"]'),
-        ).find((element) => isElementVisibleInDocument(element, doc));
+        ).find((element) => isElementVisible(element));
         if (externalApply) {
           cleanup();
           return {
@@ -1661,7 +1582,7 @@
           .join("；");
         if (
           isLoginOrVerifyText(feedbackText) ||
-          hasVisibleLoginSurfaceInDocument(doc)
+          hasVisibleLoginSurface(doc)
         ) {
           cleanup();
           return {
@@ -1691,7 +1612,7 @@
               ),
             ).find(
               (element) =>
-                isElementVisibleInDocument(element, finalDoc) &&
+                isElementVisible(element) &&
                 /^(已沟通|已投递|聊过了|已招满)$/.test(
                   normalizeText(element.innerText || element.textContent || ""),
                 ),

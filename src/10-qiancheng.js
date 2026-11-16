@@ -166,15 +166,9 @@
     if (!card || !document.contains(card)) {
       return { ok: false, message: "职位卡片已刷新，跳过" };
     }
-    if (job.expired || job.externalApply) {
-      return {
-        ok: false,
-        skipped: true,
-        message: job.expired ? "职位已下线，跳过" : "该职位需前往外部网站投递，跳过",
-      };
-    }
-    if (job.contact) {
-      return { ok: false, skipped: true, message: "职位已申请，跳过重复投递" };
+    // 外部投递和已申请职位已由 canApply / contact 在通用过滤中跳过。
+    if (job.expired) {
+      return { ok: false, skipped: true, message: "职位已下线，跳过" };
     }
 
     const button = card.querySelector(QIANCHENG_SELECTORS.applyButton);

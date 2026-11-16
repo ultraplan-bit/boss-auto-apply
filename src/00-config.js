@@ -5,21 +5,20 @@ const APP_ID = "boss-auto-apply-lite";
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.7";
+  const VERSION = "0.2.8";
+
+  // 防风控的固定参数，不开放给面板配置。
+  const DAILY_LIMIT = 150;
+  const DELAY_MIN_SEC = 4;
+  const DELAY_MAX_SEC = 10;
+  const PAGE_DELAY_SEC = 3;
+  const BOSS_ACTIVE_WITHIN_DAYS = 14;
+  // 投递记录保留天数，跨天也不会重复投递同一职位。
+  const HISTORY_RETENTION_DAYS = 30;
 
   const DEFAULT_CONFIG = {
-    autoNextPage: true,
-    fetchDetail: true,
     debug: false,
-    skipAppliedHistory: true,
-    skipHeadhunter: true,
     onlyOnlineBoss: false,
-    maxApplyCount: 9999,
-    dailyLimit: 150,
-    delayMinSec: 4,
-    delayMaxSec: 10,
-    pageDelaySec: 3,
-    activeWithinDays: 14,
     includeDescriptionKeywords: "",
     excludeDescriptionKeywords: "",
     shixisengResume: "",
@@ -38,14 +37,6 @@ const APP_ID = "boss-auto-apply-lite";
       ".job-card-box",
       ".job-list-box .job-card-body",
       ".rec-job-list .job-card-wrapper",
-    ],
-    scrollContainers: [
-      ".job-list-container",
-      ".job-list",
-      ".recommend-job-list",
-      ".job-recommend-result",
-      ".recommend-result-inner",
-      ".page-job-inner",
     ],
     nextIcon: ".ui-icon-arrow-right",
   };
