@@ -71,7 +71,8 @@
   // 旧版只记录当天的 appliedKeys，读取时按其 date 迁移。
   function loadHistory() {
     const today = getToday();
-    const stored = gmGet(getHistoryKey(), null) || {};
+    const historyKey = getHistoryKey();
+    const stored = gmGet(historyKey, null) || {};
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - HISTORY_RETENTION_DAYS);
     const cutoff = formatDate(cutoffDate);
@@ -101,11 +102,26 @@
           .length;
       }
     }
+    cachedHistorySummary = { key: historyKey, date: today, dailyCount };
     return { date: today, dailyCount, applied };
   }
 
   function saveHistory(history) {
-    gmSet(getHistoryKey(), history);
+    const key = getHistoryKey();
+    gmSet(key, history);
+    cachedHistorySummary = { key, date: history.date, dailyCount: history.dailyCount };
+  }
+
+  function getHistorySummary() {
+    // 运行中的面板只需计数；配额和去重仍通过 loadHistory 实时读取。
+    if (
+      !state.running ||
+      cachedHistorySummary?.key !== getHistoryKey() ||
+      cachedHistorySummary.date !== getToday()
+    ) {
+      loadHistory();
+    }
+    return cachedHistorySummary;
   }
 
   function recordApplied(job) {

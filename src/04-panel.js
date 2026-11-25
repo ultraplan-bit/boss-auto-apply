@@ -2,20 +2,25 @@
   // 日志、通知与面板
   // =====================================================================
 
-  function log(level, message, data) {
+  function log(level, message) {
     if (level === "debug" && !config.debug) return;
-    const time = new Date().toLocaleTimeString();
-    const entry = { time, level, message, data };
+    const entry = { time: new Date().toLocaleTimeString(), level, message };
     state.logs.unshift(entry);
-    state.logs = state.logs.slice(0, 120);
+    if (state.logs.length > 120) state.logs.pop();
 
-    const prefix = `[${APP_ID}] ${message}`;
-    if (level === "error") console.error(prefix, data || "");
-    else if (level === "warn") console.warn(prefix, data || "");
-    else if (level === "debug") console.debug(prefix, data || "");
-    else console.log(prefix, data || "");
-
+    const logs = cachedPanel?.querySelector('[data-role="logs"]');
+    if (logs) {
+      logs.prepend(createLogRow(entry));
+      if (logs.childElementCount > state.logs.length) logs.lastElementChild.remove();
+    }
     renderPanel();
+  }
+
+  function createLogRow({ time, level, message }) {
+    const row = document.createElement("div");
+    row.className = `aj-log aj-log-${level}`;
+    row.textContent = `[${time}] ${message}`;
+    return row;
   }
 
   function notify(title, text) {
@@ -207,7 +212,7 @@
     const adapter = getAdapter();
     if (!cachedPanel.firstElementChild) renderPanelSkeleton(adapter);
 
-    const history = loadHistory();
+    const history = getHistorySummary();
     cachedPanel.classList.toggle("is-collapsed", state.collapsed);
     const runningText = state.running
       ? state.stopping
@@ -219,15 +224,6 @@
         ? ""
         : ` · 平台剩余 ${state.platformRemainingQuota}`;
     const dailyLimit = getDailyLimit(adapter);
-    const logsHtml = state.logs.length
-      ? state.logs
-        .map(
-          (item) =>
-            `<div class="aj-log aj-log-${item.level}">[${htmlEscape(item.time)}] ${htmlEscape(item.message)}</div>`,
-        )
-        .join("")
-      : '<div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>';
-
     const part = (selector) => cachedPanel.querySelector(selector);
     part('[data-role="subtitle"]').textContent =
       `v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}`;
@@ -249,7 +245,6 @@
     part('[data-role="current"]').textContent = `当前：${state.current}`;
     part('[data-action="start"]').disabled = state.running;
     part('[data-action="stop"]').disabled = !state.running;
-    part('[data-role="logs"]').innerHTML = logsHtml;
   }
 
   function renderPanelSkeleton(adapter) {
@@ -270,9 +265,15 @@
           <button class="aj-btn aj-btn-primary" data-action="start">开始</button>
           <button class="aj-btn aj-btn-danger" data-action="stop">停止</button>
         </div>
-        <div class="aj-logs" data-role="logs"></div>
+        <div class="aj-logs" data-role="logs">
+          <div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>
+        </div>
       </div>
     `;
+    if (state.logs.length) {
+      cachedPanel.querySelector('[data-role="logs"]')
+        .replaceChildren(...state.logs.map(createLogRow));
+    }
     renderConfigForm();
   }
 
@@ -452,7 +453,7 @@
         state.running = false;
         state.stopping = false;
         state.current = "异常停止";
-        log("error", `运行异常：${error.message || error}`, error);
+        log("error", `运行异常：${error.message || error}`);
       });
       return;
     }

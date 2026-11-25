@@ -209,46 +209,50 @@
 
   function getDeepValue(obj, wantedKey) {
     if (!obj || typeof obj !== "object") return undefined;
-    if (Object.prototype.hasOwnProperty.call(obj, wantedKey))
-      return obj[wantedKey];
 
     const queue = [obj];
-    const seen = new WeakSet();
-    let depthGuard = 0;
-    while (queue.length && depthGuard < 120) {
-      depthGuard += 1;
-      const current = queue.shift();
-      if (!current || typeof current !== "object" || seen.has(current))
-        continue;
-      seen.add(current);
+    const seen = new WeakSet([obj]);
+    for (let index = 0; index < queue.length; index += 1) {
+      const current = queue[index];
       if (Object.prototype.hasOwnProperty.call(current, wantedKey))
         return current[wantedKey];
-      for (const value of Object.values(current).slice(0, 40)) {
-        if (value && typeof value === "object") queue.push(value);
+      if (queue.length >= 120) continue;
+      // 先截取键，避免 Object.values 读取范围外的 Vue getter。
+      for (const key of Object.keys(current).slice(0, 40)) {
+        if (queue.length >= 120) break;
+        const value = current[key];
+        if (value && typeof value === "object" && !seen.has(value)) {
+          seen.add(value);
+          queue.push(value);
+        }
       }
     }
     return undefined;
   }
 
   function findObjectByPredicate(seedList, predicate, maxDepth = 5) {
-    const queue = (seedList || [])
-      .filter(Boolean)
-      .map((value) => ({ value, depth: 0 }));
+    const queue = [];
     const seen = new WeakSet();
+    // ponytail: 只探测前 500 个对象；适配新版数据结构时优先补充直接数据入口。
+    const enqueue = (value, depth) => {
+      if (
+        queue.length < 500 && value && typeof value === "object" &&
+        !seen.has(value)
+      ) {
+        seen.add(value);
+        queue.push({ value, depth });
+      }
+    };
+    for (const value of seedList || []) enqueue(value, 0);
 
-    while (queue.length) {
-      const { value, depth } = queue.shift();
-      if (!value || typeof value !== "object") continue;
-      if (seen.has(value)) continue;
-      seen.add(value);
-
+    for (let index = 0; index < queue.length; index += 1) {
+      const { value, depth } = queue[index];
       if (predicate(value)) return value;
-      if (depth >= maxDepth) continue;
+      if (depth >= maxDepth || queue.length >= 500) continue;
 
-      for (const child of Object.values(value).slice(0, 60)) {
-        if (child && typeof child === "object") {
-          queue.push({ value: child, depth: depth + 1 });
-        }
+      for (const key of Object.keys(value).slice(0, 60)) {
+        if (queue.length >= 500) break;
+        enqueue(value[key], depth + 1);
       }
     }
     return null;
@@ -366,6 +370,7 @@
             // ignore
           }
         }
+        opened.length = 0;
       },
     };
   }

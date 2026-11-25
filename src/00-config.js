@@ -5,7 +5,7 @@ const APP_ID = "boss-auto-apply-lite";
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.8";
+  const VERSION = "0.2.10";
 
   // 防风控的固定参数，不开放给面板配置。
   const DAILY_LIMIT = 150;
@@ -168,3 +168,4 @@ const APP_ID = "boss-auto-apply-lite";
 
   let config = loadConfig();
   let cachedPanel = null;
+  let cachedHistorySummary = null;

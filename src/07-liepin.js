@@ -736,13 +736,13 @@
   }
 
   // editor -> { root, heading, signature }；用于判断点击后是否切换到了新会话。
-  let liepinImSnapshot = new Map();
+  let liepinImSnapshot = new WeakMap();
 
   function snapshotLiepinImWidgetsInDocument(docs) {
     const docList = Array.isArray(docs) ? docs : [docs];
     const widgets = [];
     const seenEditors = new Set();
-    liepinImSnapshot = new Map();
+    liepinImSnapshot = new WeakMap();
     for (const doc of docList) {
       for (const widget of readLiepinImState(doc).widgets) {
         if (seenEditors.has(widget.editor)) continue;
@@ -889,17 +889,10 @@
       0,
     );
     if (config.debug) {
-      log("debug", `IM 新会话检测超时，当前检测到 ${widgets.length} 个会话`, {
-        rootsSeen: states.reduce((total, state) => total + state.rootsSeen, 0),
-        inaccessibleFrames,
-        cardFound: Boolean(card && document.contains(card)),
-        widgets: widgets.map((widget) => ({
-          rootClass: String(widget.root.className || "").slice(0, 120),
-          heading: widget.heading.slice(0, 80),
-          editorTag: widget.editor.tagName,
-          editorClass: String(widget.editor.className || "").slice(0, 120),
-        })),
-      });
+      const widgetSummary = widgets.slice(0, 8).map((widget) =>
+        `${widget.heading.slice(0, 80)} [${String(widget.root.className || "").slice(0, 120)}]`,
+      ).join("；");
+      log("debug", `IM 新会话检测超时：会话 ${widgets.length}，容器 ${states.reduce((total, state) => total + state.rootsSeen, 0)}，不可读 iframe ${inaccessibleFrames}${widgetSummary ? `；${widgetSummary}` : ""}`);
     }
 
     const rootsSeen = states.reduce(
@@ -1175,10 +1168,7 @@
     }
     if (!state.editor) {
       if (config.debug) {
-        log("debug", "聊天输入框未找到", {
-          rootClass: String(root.className || "").slice(0, 120),
-          rootTag: root.tagName,
-        });
+        log("debug", `聊天输入框未找到：${String(root.className || "").slice(0, 120)} ${root.tagName}`);
       }
       return { ok: false, message: "未找到聊天输入框" };
     }
@@ -1224,11 +1214,10 @@
     }
     if (!sendButton) {
       if (config.debug) {
-        log("debug", "发送按钮未找到", {
-          editorTag: state.editor?.tagName,
-          editorClass: String(state.editor?.className || "").slice(0, 120),
-          rootClass: String(root.className || "").slice(0, 120),
-        });
+        log(
+          "debug",
+          `发送按钮未找到：${state.editor?.tagName || ""} ${String(state.editor?.className || "").slice(0, 120)} ${String(root.className || "").slice(0, 120)}`,
+        );
       }
       return { ok: false, message: "未找到发送按钮，请人工核对" };
     }
@@ -1294,14 +1283,10 @@
     }
 
     if (config.debug) {
-      log("debug", "招呼发送未确认", {
-        outgoingBefore,
-        outgoing: lastState.outgoing.length,
-        matching: lastState.matching.length,
-        defaultOutgoing: lastState.defaultOutgoing.length,
-        incoming: lastState.incoming.length,
-        editorText: lastState.editorText.slice(0, 80),
-      });
+      log(
+        "debug",
+        `招呼发送未确认：本人消息 ${outgoingBefore} -> ${lastState.outgoing.length}，匹配 ${lastState.matching.length}，默认招呼 ${lastState.defaultOutgoing.length}，招聘方回复 ${lastState.incoming.length}，输入内容 ${lastState.editorText.slice(0, 80)}`,
+      );
     }
 
     return {
@@ -1488,11 +1473,19 @@
 
     let cleaned = false;
     let restoreFramePopupWatch = null;
-    let framePopup = null;
+    const framePopups = new Set();
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       if (restoreFramePopupWatch) restoreFramePopupWatch();
+      for (const popup of framePopups) {
+        try {
+          popup.close();
+        } catch (error) {
+          // ignore
+        }
+      }
+      framePopups.clear();
       try {
         frame.remove();
       } catch (error) {
@@ -1659,7 +1652,7 @@
         const originalOpen = frameWindow.open;
         frameWindow.open = function patchedFrameOpen(...args) {
           const popup = originalOpen.apply(this, args);
-          if (popup) framePopup = popup;
+          if (popup) framePopups.add(popup);
           return popup;
         };
         restoreFramePopupWatch = () => {
@@ -1717,7 +1710,7 @@
         ) {
           break;
         }
-        if (framePopup) break;
+        if (framePopups.size) break;
         // “正在初始化”可以多试两次；普通超时只补点一次，避免无入口岗位拖太久。
         const canRetry = found.error.transient ? attempt < 2 : attempt === 0;
         if (!canRetry) break;
@@ -1726,12 +1719,7 @@
         error: { ok: false, message: "点击后未打开聊天窗口" },
       };
       if (found.error) {
-        if (framePopup) {
-          try {
-            framePopup.close();
-          } catch (error) {
-            // ignore
-          }
+        if (framePopups.size) {
           cleanup();
           return {
             ok: false,
@@ -1860,6 +1848,7 @@
       return result;
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
   }
 

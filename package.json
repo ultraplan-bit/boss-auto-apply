@@ -1,6 +1,6 @@
 {
   "name": "boss-auto-apply-userscript",
-  "version": "0.2.8",
+  "version": "0.2.10",
   "private": true,
   "description": "Lightweight Tampermonkey script for assisted auto-apply on Boss Zhipin, Liepin, Zhaopin, 51job and Shixiseng.",
   "scripts": {

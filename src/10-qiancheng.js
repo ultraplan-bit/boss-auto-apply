@@ -279,6 +279,7 @@
       };
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
   }
 

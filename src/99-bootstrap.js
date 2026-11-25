@@ -14,7 +14,7 @@
         state.running = false;
         state.stopping = false;
         state.current = "续跑异常";
-        log("error", `续跑异常：${error.message || error}`, error);
+        log("error", `续跑异常：${error.message || error}`);
       });
     }, 1200);
     return true;

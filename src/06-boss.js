@@ -28,8 +28,13 @@
     });
   }
 
-  function buildBossJobDetail(card, index) {
+  function buildBossJobDetail(card, index, processedKeys) {
     const raw = pickJobData(card) || {};
+    const encryptJobId = pickFirstString(raw, ["encryptJobId", "jobId", "encryptJobID"]);
+    // 跨页滚动会保留旧卡片，先用稳定的职位 ID 跳过已处理职位。
+    const key = encryptJobId ? `boss|${encryptJobId}` : "";
+    if (key && processedKeys?.has(key)) return null;
+
     const text = normalizeText(card.innerText || card.textContent || "");
     const jobName =
       pickFirstString(raw, ["jobName", "jobTitle", "title", "positionName"]) ||
@@ -53,19 +58,16 @@
     const salaryDesc =
       pickFirstString(raw, ["salaryDesc", "salary", "salaryName"]) ||
       pickDomText(card, [".salary", ".job-salary", ".salary-desc"]);
+    const labels = raw.jobLabels || raw.labels || raw.skills || [];
+    const skills = raw.skills || [];
 
+    // BOSS 通过接口投递，只保留字段快照，避免任务队列持有卡片及 Vue 组件。
     const job = {
       platform: "boss",
       index,
-      card,
-      raw,
       rawText: text,
       securityId: pickFirstString(raw, ["securityId", "securityID"]),
-      encryptJobId: pickFirstString(raw, [
-        "encryptJobId",
-        "jobId",
-        "encryptJobID",
-      ]),
+      encryptJobId,
       lid: pickFirstString(raw, ["lid", "listId"]),
       encryptBossId: pickFirstString(raw, [
         "encryptBossId",
@@ -91,8 +93,8 @@
         "scaleName",
       ]),
       brandIndustry: pickFirstString(raw, ["brandIndustry", "industryName"]),
-      jobLabels: raw.jobLabels || raw.labels || raw.skills || [],
-      skills: raw.skills || [],
+      jobLabels: normalizeText(Array.isArray(labels) ? labels.join(" ") : labels),
+      skills: normalizeText(Array.isArray(skills) ? skills.join(" ") : skills),
       detailUrl:
         pickFirstString(raw, ["detailUrl", "jobUrl", "url"]) ||
         card.querySelector('a[href*="/job_detail/"]')?.href ||
@@ -114,43 +116,35 @@
     job.recruiterOnline =
       job.bossOnline === true || /在线/.test(job.rawText);
     // lid 随每次搜索变化，用 encryptJobId 作为跨天稳定的去重 key。
-    if (job.encryptJobId) job.key = `boss|${job.encryptJobId}`;
+    if (key) job.key = key;
 
     if (!job.jobName && !job.brandName && !job.securityId) return null;
     return job;
   }
 
   function pickJobData(card) {
-    const candidates = [];
-    const directKeys = [
-      "__vue__",
-      "__vue_app__",
-      "__vueParentComponent",
-      "_vnode",
-    ];
+    const vue = card.__vue__;
+    const component = card.__vueParentComponent;
+    // 先查卡片自身的数据；混入组件实例会提前展开无关 getter 和整页组件树。
+    const direct = findJobLikeObject([
+      vue?._props,
+      vue?.$props,
+      component?.props,
+      vue?._data,
+      vue?.data,
+      component?.data,
+      component?.setupState,
+    ]);
+    if (direct) return direct;
 
-    for (const key of directKeys) {
-      if (card[key]) candidates.push(card[key]);
-    }
-
-    if (card.__vue__) {
-      candidates.push(
-        card.__vue__.data,
-        card.__vue__._data,
-        card.__vue__._props,
-        card.__vue__.$props,
-      );
-    }
-    if (card.__vueParentComponent) {
-      candidates.push(
-        card.__vueParentComponent.props,
-        card.__vueParentComponent.ctx,
-        card.__vueParentComponent.setupState,
-        card.__vueParentComponent.proxy,
-      );
-    }
-
-    return findJobLikeObject(candidates);
+    return findJobLikeObject([
+      vue,
+      card.__vue_app__,
+      component,
+      card._vnode,
+      component?.ctx,
+      component?.proxy,
+    ]);
   }
 
   function findJobLikeObject(seedList) {
@@ -281,7 +275,7 @@
       },
     );
     const data = await parseResponse(response);
-    debugBossResponse(job, response, data);
+    if (config.debug) debugBossResponse(job, response, data);
 
     if (!response.ok) {
       return {
@@ -621,19 +615,10 @@
 
   function debugBossResponse(job, response, data) {
     const message = extractBossMessage(data);
-    if (
-      !config.debug &&
-      response.ok &&
-      (data?.code === 0 || message === "Success")
-    )
-      return;
-    console.groupCollapsed(
-      `[${APP_ID}] 投递接口响应 ${response.status} ${data?.code ?? ""} ${formatJob(job)}`,
+    log(
+      "debug",
+      `投递接口响应 ${response.status} ${data?.code ?? ""} ${formatJob(job)}：${message.slice(0, 200)}`,
     );
-    console.log("message:", message);
-    console.log("chatRemindDialog:", getChatRemindDialog(data));
-    console.log("raw:", data);
-    console.groupEnd();
   }
 
   async function goBossNextPageOrScroll() {

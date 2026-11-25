@@ -89,6 +89,7 @@
       }
       await runApplyLoop(adapter, applySession);
     } finally {
+      state.processedKeys = new Set();
       adapter.closeApplySession?.(applySession);
       state.running = false;
       state.stopping = false;
@@ -167,7 +168,7 @@
       const cards = adapter.getCards();
       if (cards.length > 0) {
         const jobs = cards
-          .map((card, index) => adapter.buildJob(card, index))
+          .map((card, index) => adapter.buildJob(card, index, state.processedKeys))
           .filter(Boolean);
         return dedupeJobs(jobs).filter(
           (job) => !state.processedKeys.has(getJobUniqueKey(job)),
@@ -288,7 +289,6 @@
       log(
         "error",
         `处理失败【${formatJob(job)}】：${error.message || error}`,
-        error,
       );
       if (error.limited) {
         state.current = error.message || "平台限制";

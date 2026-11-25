@@ -80,6 +80,62 @@ test("关键词拆分支持中英文逗号、分号和换行", () => {
   );
 });
 
+test("对象搜索只读取限定范围内的属性，不触发范围外 getter", () => {
+  const { context } = loadScript();
+  let reads = 0;
+  const wide = {};
+  for (let i = 0; i < 10000; i += 1) {
+    Object.defineProperty(wide, `key${i}`, {
+      enumerable: true,
+      get() { reads += 1; return 0; },
+    });
+  }
+
+  assert.equal(context.getDeepValue(wide, "missing"), undefined);
+  assert.equal(reads, 40);
+  reads = 0;
+  assert.equal(context.findObjectByPredicate([wide], () => false), null);
+  assert.equal(reads, 60);
+});
+
+test("对象搜索限制整棵组件图大小，循环引用和普通职位仍可读取", () => {
+  const { context } = loadScript();
+  let reads = 0, visited = 0;
+  const branch = (depth) => {
+    const node = {};
+    if (!depth) return node;
+    for (let i = 0; i < 12; i += 1) {
+      Object.defineProperty(node, `child${i}`, {
+        enumerable: true,
+        get() { reads += 1; return branch(depth - 1); },
+      });
+    }
+    return node;
+  };
+  assert.equal(context.findObjectByPredicate([branch(4)], () => {
+    visited += 1;
+    return false;
+  }, 4), null);
+  assert.equal(visited, 500);
+  assert.equal(reads, 499);
+  reads = 0;
+  assert.equal(context.getDeepValue(branch(4), "missing"), undefined);
+  assert.equal(reads, 119);
+
+  const job = { securityId: "s", encryptJobId: "job", lid: "list" };
+  const component = { props: { job } };
+  component.self = component;
+  component.duplicate = component.props;
+  assert.equal(context.findJobLikeObject([component, component]), job);
+  assert.equal(context.getDeepValue(component, "encryptJobId"), "job");
+  assert.equal(context.findObjectByPredicate([component], value => value === job, 1), null);
+
+  const position = { applyType: 1, jobId: "position", companyName: "测试公司" };
+  const vue3 = { props: { item: position } };
+  vue3.parent = vue3;
+  assert.equal(context.pickZhaopinPosition({ __vueParentComponent: vue3 }), position);
+});
+
 test("配置只保留当前字段并校验类型", () => {
   const { run } = loadScript({
     storage: {
@@ -168,6 +224,196 @@ const bossJob = {
   brandName: "测试公司",
 };
 
+test("日志增量更新并有数量上限，不向控制台保留原始对象", () => {
+  const { context, run } = loadScript();
+  const consoleCalls = [];
+  context.console = Object.fromEntries(
+    ["log", "warn", "error", "debug"].map((method) => [
+      method,
+      (...args) => consoleCalls.push(args),
+    ]),
+  );
+  const rows = [{ remove() { rows.pop(); } }];
+  let created = 0;
+  const logs = {
+    prepend(row) { rows.unshift(row); },
+    get childElementCount() { return rows.length; },
+    get lastElementChild() { return rows.at(-1); },
+    set innerHTML(_value) { assert.fail("状态更新不应重建日志节点"); },
+  };
+  context.document = {
+    createElement() {
+      created += 1;
+      return { remove() { rows.splice(rows.indexOf(this), 1); } };
+    },
+  };
+  context.panel = {
+    firstElementChild: {},
+    classList: { toggle() {} },
+    querySelector: (selector) => selector === '[data-role="logs"]' ? logs : {},
+  };
+  run("cachedPanel = panel; config.debug = true;");
+  run('for (let i = 0; i < 500; i++) log("debug", `日志 ${i}`, { payload: new Array(1000).fill(i) });');
+  const latest = rows[0];
+  run("renderPanel(); renderPanel();");
+
+  assert.equal(run("state.logs.length"), 120);
+  assert.equal(run('"data" in state.logs[0]'), false);
+  assert.equal(consoleCalls.length, 0);
+  assert.equal(created, 500);
+  assert.equal(rows.length, 120);
+  assert.equal(rows[0], latest);
+  assert.match(rows[0].textContent, /日志 499$/);
+  assert.match(rows.at(-1).textContent, /日志 380$/);
+});
+
+test("Boss 滚动后按稳定 ID 跳过旧卡片，复用节点仍能读取新职位", async () => {
+  const { context, run } = loadScript();
+  const adapter = run("ADAPTERS.boss");
+  let textReads = 0;
+  const card = {
+    __vue__: { ...bossJob },
+    get innerText() { textReads += 1; return "测试卡片"; },
+    querySelector() { return null; },
+  };
+  adapter.getCards = () => [card];
+  run('state.processedKeys.add("boss|job-1");');
+
+  assert.equal((await context.collectJobsWithWait(adapter)).length, 0);
+  assert.equal(textReads, 0);
+
+  card.__vue__.encryptJobId = "job-2";
+  const [job] = await context.collectJobsWithWait(adapter);
+  assert.equal(job.key, "boss|job-2");
+  assert.equal(textReads, 1);
+});
+
+test("运行中面板复用历史摘要，配额和去重仍读取跨标签页的最新记录", () => {
+  const key = "boss-auto-apply-lite:history";
+  const today = formatDate(new Date());
+  const { context, run, store } = loadScript({
+    storage: { [key]: { date: today, dailyCount: 3, applied: {} } },
+  });
+  const getValue = context.GM_getValue;
+  let reads = 0;
+  context.GM_getValue = (key, fallback) => {
+    if (key.endsWith(":history")) reads += 1;
+    return getValue(key, fallback);
+  };
+  const subtitle = {};
+  context.panel = {
+    firstElementChild: {},
+    classList: { toggle() {} },
+    querySelector: selector => selector === '[data-role="subtitle"]' ? subtitle : {},
+  };
+  run("cachedPanel = panel; loadHistory(); state.running = true;");
+  for (let i = 0; i < 100; i += 1) context.renderPanel();
+  assert.equal(reads, 1);
+  assert.match(subtitle.textContent, /今日已投 3\//);
+
+  store.set(key, { date: today, dailyCount: 4, applied: { "boss|other-tab": today } });
+  assert.equal(context.hasAppliedBefore({ key: "boss|other-tab" }), true);
+  context.renderPanel();
+  assert.equal(reads, 2);
+  assert.match(subtitle.textContent, /今日已投 4\//);
+  context.recordApplied({ key: "boss|new" });
+  context.renderPanel();
+  assert.equal(reads, 3);
+  assert.match(subtitle.textContent, /今日已投 5\//);
+
+  store.get(key).dailyCount = 6;
+  run("state.running = false;");
+  context.renderPanel();
+  assert.equal(reads, 4);
+  assert.match(subtitle.textContent, /今日已投 6\//);
+
+  run("state.running = true;");
+  const tomorrow = daysAgo(-1);
+  context.getToday = () => tomorrow;
+  context.renderPanel();
+  assert.equal(reads, 5);
+  assert.match(subtitle.textContent, /今日已投 0\//);
+  context.location.hostname = "www.liepin.com";
+  store.set("boss-auto-apply-lite:liepin:history", { date: tomorrow, dailyCount: 8, applied: {} });
+  context.renderPanel();
+  assert.equal(reads, 6);
+  assert.match(subtitle.textContent, /今日已投 8\//);
+});
+
+test("任务结束后释放已处理职位集合", async () => {
+  const { context, run } = loadScript();
+  const adapter = run("ADAPTERS.boss");
+  let processedDuringNextPage = 0;
+  Object.assign(adapter, {
+    isListPage: () => true,
+    ensureLogin: () => ({ ok: true }),
+    getCards: () => [{}],
+    buildJob: () => ({ ...bossJob, contact: true }),
+    createApplySession: undefined,
+    closeApplySession: undefined,
+    nextPage: async () => {
+      processedDuringNextPage = run("state.processedKeys.size");
+      return false;
+    },
+  });
+
+  await context.startApply();
+
+  assert.equal(processedDuringNextPage, 1);
+  assert.equal(run("state.processedKeys.size"), 0);
+});
+
+test("Boss 优先读取 Vue 数据入口，重复扫描旧卡片不展开组件 getter", () => {
+  const { context } = loadScript();
+  for (const [componentKey, dataKey] of [
+    ["__vue__", "_props"], ["__vue__", "_data"],
+    ["__vueParentComponent", "props"], ["__vueParentComponent", "setupState"],
+  ]) {
+    let reads = 0;
+    const raw = { ...bossJob };
+    const component = {
+      [dataKey]: { job: raw },
+      get unrelated() { reads += 1; return { child: {} }; },
+    };
+    const card = { [componentKey]: component };
+    assert.equal(context.pickJobData(card), raw);
+    const processed = new Set([bossJob.key]);
+    for (let i = 0; i < 1000; i += 1) {
+      assert.equal(context.buildBossJobDetail(card, i, processed), null);
+    }
+    assert.equal(reads, 0);
+    // Vue 2 会把 data 中的字段代理到组件本身，仍应选中独立职位数据。
+    Object.assign(component, bossJob);
+    assert.equal(context.pickJobData(card), raw);
+  }
+  const fallback = { ...bossJob };
+  assert.equal(context.pickJobData({ _vnode: { job: fallback } }), fallback);
+});
+
+test("Boss 待处理职位仅保留数据快照，不持有 DOM 或响应式标签数组", () => {
+  const { context } = loadScript();
+  const raw = { ...bossJob, jobLabels: ["双休"], skills: ["JavaScript"] };
+  const card = {
+    __vue__: { _props: { job: raw } },
+    innerText: "前端工程师 测试公司",
+    querySelector() { return null; },
+  };
+  raw.jobLabels.owner = card.__vue__;
+  raw.skills.owner = card.__vue__;
+  const job = context.buildBossJobDetail(card, 0);
+  assert.equal("card" in job, false);
+  assert.equal("raw" in job, false);
+  assert.notEqual(job.jobLabels, raw.jobLabels);
+  assert.notEqual(job.skills, raw.skills);
+  raw.jobLabels[0] = "已变化";
+  raw.skills[0] = "已变化";
+  const text = context.fuzzyText(job, null);
+  assert.match(text, /双休/);
+  assert.match(text, /JavaScript/);
+  assert.doesNotMatch(text, /已变化/);
+  assert.equal(context.getJobUniqueKey(job), bossJob.key);
+});
+
 test("Boss 未配置关键词时仍按详情过滤不活跃招聘者", async () => {
   const { context, run } = loadScript();
   const { adapter, calls } = makeBossAdapter(run, {
@@ -215,6 +461,47 @@ test("非 Boss 平台未配置关键词时不请求详情", async () => {
     adapter,
   );
   assert.equal(fetched, 0);
+});
+
+test("前程无忧投递异常时关闭已捕获的弹窗", async () => {
+  const { context } = loadScript({ hostname: "we.51job.com" });
+  const popup = { closed: false, close() { this.closed = true; } };
+  const originalOpen = () => popup;
+  context.open = originalOpen;
+  context.document = {
+    contains: () => true,
+    querySelectorAll: () => [],
+  };
+  const button = {
+    disabled: false,
+    className: "",
+    hasAttribute: () => false,
+    getAttribute: () => null,
+    click() {
+      context.open();
+      throw new Error("模拟点击异常");
+    },
+  };
+  const card = { querySelector: () => button };
+
+  await assert.rejects(
+    context.applyQianchengJob({ card }),
+    /模拟点击异常/,
+  );
+  assert.equal(popup.closed, true);
+  assert.equal(context.open, originalOpen);
+});
+
+test("实习僧初始化失败时关闭已打开的投递窗口", () => {
+  const { context } = loadScript({ hostname: "www.shixiseng.com" });
+  let closed = 0;
+  context.open = () => ({
+    document: { open() { throw new Error("模拟初始化异常"); } },
+    close() { closed += 1; },
+  });
+
+  assert.equal(context.createShixisengApplySession(), null);
+  assert.equal(closed, 1);
 });
 
 test("Boss 真实旧 key 迁移后仍去重，并保留最新日期和每日计数", () => {
@@ -348,8 +635,59 @@ test("详情请求期间停止后，不再发起投递或增加匹配数", async
   assert.equal(run("state.stopping"), true);
 });
 
+test("猎聘详情页清理所有弹窗和 iframe", async () => {
+  for (const outcome of ["error", "success"]) {
+    const { context } = loadScript({ hostname: "www.liepin.com" });
+    const opened = [];
+    const originalOpen = () => {
+      const popup = { closed: false, close() { this.closed = true; } };
+      opened.push(popup);
+      return popup;
+    };
+    const frameWindow = { open: originalOpen };
+    const detailDoc = {};
+    let removed = false;
+    const frame = {
+      contentWindow: frameWindow,
+      style: {},
+      setAttribute() {},
+      addEventListener(type, listener) {
+        if (type === "load") listener();
+      },
+      remove() { removed = true; },
+    };
+    context.setTimeout = (callback) => { callback(); return 0; };
+    context.document = { body: { appendChild() {} }, createElement: () => frame };
+    context.getFrameUrl = () => "https://www.liepin.com/job/mock";
+    context.getFrameDocument = () => detailDoc;
+    context.findLiepinDetailChatButton = () => ({
+      innerText: "聊一聊",
+      click() {},
+    });
+    context.snapshotLiepinImWidgetsInDocument = () => [];
+    context.waitForNewLiepinImWidgetInDocument = async () => {
+      frameWindow.open();
+      frameWindow.open();
+      return outcome === "error"
+        ? { error: { ok: false, message: "模拟超时" } }
+        : { widget: { doc: detailDoc, root: {} } };
+    };
+    context.deliverLiepinGreetingInDocument = async () => ({ ok: true });
+
+    const result = await context.applyLiepinViaDetailFrame({
+      detailUrl: "https://www.liepin.com/job/mock",
+    });
+
+    assert.equal(result.ok, outcome === "success");
+    assert.equal(removed, true);
+    assert.ok(opened.every((popup) => popup.closed));
+    assert.equal(frameWindow.open, originalOpen);
+  }
+});
+
 test("猎聘新会话必须唯一匹配岗位，不按窗口数量猜测", () => {
-  const { context } = loadScript({ hostname: "www.liepin.com" });
+  const { context, run } = loadScript({ hostname: "www.liepin.com" });
+  assert.equal(run("liepinImSnapshot instanceof WeakMap"), true);
   const job = { recruiterName: "目标招聘者", brandName: "目标公司", jobName: "工程师" };
   let widgets = [];
   context.readLiepinImState = () => ({ widgets });

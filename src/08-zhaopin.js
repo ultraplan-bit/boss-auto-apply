@@ -804,6 +804,7 @@
       clickZhaopinElement(applyButton);
     } catch (error) {
       popupWatch.restore();
+      popupWatch.closeAll();
       throw error;
     }
 
@@ -894,6 +895,7 @@
       }
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
 
     return {
@@ -949,6 +951,7 @@
       clickZhaopinElement(button);
     } catch (error) {
       popupWatch.restore();
+      popupWatch.closeAll();
       throw error;
     }
 
@@ -1046,6 +1049,7 @@
       }
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
 
     return {

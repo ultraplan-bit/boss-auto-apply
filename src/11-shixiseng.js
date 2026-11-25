@@ -161,6 +161,7 @@
       tab.document.write("<!doctype html><title>实习僧自动投递</title><p>正在准备投递…</p>");
       tab.document.close();
     } catch (error) {
+      closeShixisengApplySession(tab);
       return null;
     }
     return tab;

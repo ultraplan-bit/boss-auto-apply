@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Boss/猎聘/智联/前程无忧 自动投递助手
 // @namespace    https://github.com/ultraplan-bit/boss-auto-apply
-// @version      0.2.8
+// @version      0.2.10
 // @description  在 Boss 直聘、猎聘、智联招聘、前程无忧、实习僧的职位列表页按筛选规则自动批量投递（基于 muyuniao 原脚本二次开发）。
 // @author       plove
 // @homepageURL  https://github.com/ultraplan-bit/boss-auto-apply
@@ -35,7 +35,7 @@
   const RESUME_KEY = `${APP_ID}:resume`;
   const PANEL_ID = `${APP_ID}-panel`;
   const STYLE_ID = `${APP_ID}-style`;
-  const VERSION = "0.2.8";
+  const VERSION = "0.2.10";
 
   // 防风控的固定参数，不开放给面板配置。
   const DAILY_LIMIT = 150;
@@ -198,6 +198,7 @@
 
   let config = loadConfig();
   let cachedPanel = null;
+  let cachedHistorySummary = null;
 
   // =====================================================================
   // 平台适配器
@@ -406,7 +407,8 @@
   // 旧版只记录当天的 appliedKeys，读取时按其 date 迁移。
   function loadHistory() {
     const today = getToday();
-    const stored = gmGet(getHistoryKey(), null) || {};
+    const historyKey = getHistoryKey();
+    const stored = gmGet(historyKey, null) || {};
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - HISTORY_RETENTION_DAYS);
     const cutoff = formatDate(cutoffDate);
@@ -436,11 +438,26 @@
           .length;
       }
     }
+    cachedHistorySummary = { key: historyKey, date: today, dailyCount };
     return { date: today, dailyCount, applied };
   }
 
   function saveHistory(history) {
-    gmSet(getHistoryKey(), history);
+    const key = getHistoryKey();
+    gmSet(key, history);
+    cachedHistorySummary = { key, date: history.date, dailyCount: history.dailyCount };
+  }
+
+  function getHistorySummary() {
+    // 运行中的面板只需计数；配额和去重仍通过 loadHistory 实时读取。
+    if (
+      !state.running ||
+      cachedHistorySummary?.key !== getHistoryKey() ||
+      cachedHistorySummary.date !== getToday()
+    ) {
+      loadHistory();
+    }
+    return cachedHistorySummary;
   }
 
   function recordApplied(job) {
@@ -708,46 +725,50 @@
 
   function getDeepValue(obj, wantedKey) {
     if (!obj || typeof obj !== "object") return undefined;
-    if (Object.prototype.hasOwnProperty.call(obj, wantedKey))
-      return obj[wantedKey];
 
     const queue = [obj];
-    const seen = new WeakSet();
-    let depthGuard = 0;
-    while (queue.length && depthGuard < 120) {
-      depthGuard += 1;
-      const current = queue.shift();
-      if (!current || typeof current !== "object" || seen.has(current))
-        continue;
-      seen.add(current);
+    const seen = new WeakSet([obj]);
+    for (let index = 0; index < queue.length; index += 1) {
+      const current = queue[index];
       if (Object.prototype.hasOwnProperty.call(current, wantedKey))
         return current[wantedKey];
-      for (const value of Object.values(current).slice(0, 40)) {
-        if (value && typeof value === "object") queue.push(value);
+      if (queue.length >= 120) continue;
+      // 先截取键，避免 Object.values 读取范围外的 Vue getter。
+      for (const key of Object.keys(current).slice(0, 40)) {
+        if (queue.length >= 120) break;
+        const value = current[key];
+        if (value && typeof value === "object" && !seen.has(value)) {
+          seen.add(value);
+          queue.push(value);
+        }
       }
     }
     return undefined;
   }
 
   function findObjectByPredicate(seedList, predicate, maxDepth = 5) {
-    const queue = (seedList || [])
-      .filter(Boolean)
-      .map((value) => ({ value, depth: 0 }));
+    const queue = [];
     const seen = new WeakSet();
+    // ponytail: 只探测前 500 个对象；适配新版数据结构时优先补充直接数据入口。
+    const enqueue = (value, depth) => {
+      if (
+        queue.length < 500 && value && typeof value === "object" &&
+        !seen.has(value)
+      ) {
+        seen.add(value);
+        queue.push({ value, depth });
+      }
+    };
+    for (const value of seedList || []) enqueue(value, 0);
 
-    while (queue.length) {
-      const { value, depth } = queue.shift();
-      if (!value || typeof value !== "object") continue;
-      if (seen.has(value)) continue;
-      seen.add(value);
-
+    for (let index = 0; index < queue.length; index += 1) {
+      const { value, depth } = queue[index];
       if (predicate(value)) return value;
-      if (depth >= maxDepth) continue;
+      if (depth >= maxDepth || queue.length >= 500) continue;
 
-      for (const child of Object.values(value).slice(0, 60)) {
-        if (child && typeof child === "object") {
-          queue.push({ value: child, depth: depth + 1 });
-        }
+      for (const key of Object.keys(value).slice(0, 60)) {
+        if (queue.length >= 500) break;
+        enqueue(value[key], depth + 1);
       }
     }
     return null;
@@ -865,6 +886,7 @@
             // ignore
           }
         }
+        opened.length = 0;
       },
     };
   }
@@ -945,20 +967,25 @@
   // 日志、通知与面板
   // =====================================================================
 
-  function log(level, message, data) {
+  function log(level, message) {
     if (level === "debug" && !config.debug) return;
-    const time = new Date().toLocaleTimeString();
-    const entry = { time, level, message, data };
+    const entry = { time: new Date().toLocaleTimeString(), level, message };
     state.logs.unshift(entry);
-    state.logs = state.logs.slice(0, 120);
+    if (state.logs.length > 120) state.logs.pop();
 
-    const prefix = `[${APP_ID}] ${message}`;
-    if (level === "error") console.error(prefix, data || "");
-    else if (level === "warn") console.warn(prefix, data || "");
-    else if (level === "debug") console.debug(prefix, data || "");
-    else console.log(prefix, data || "");
-
+    const logs = cachedPanel?.querySelector('[data-role="logs"]');
+    if (logs) {
+      logs.prepend(createLogRow(entry));
+      if (logs.childElementCount > state.logs.length) logs.lastElementChild.remove();
+    }
     renderPanel();
+  }
+
+  function createLogRow({ time, level, message }) {
+    const row = document.createElement("div");
+    row.className = `aj-log aj-log-${level}`;
+    row.textContent = `[${time}] ${message}`;
+    return row;
   }
 
   function notify(title, text) {
@@ -1150,7 +1177,7 @@
     const adapter = getAdapter();
     if (!cachedPanel.firstElementChild) renderPanelSkeleton(adapter);
 
-    const history = loadHistory();
+    const history = getHistorySummary();
     cachedPanel.classList.toggle("is-collapsed", state.collapsed);
     const runningText = state.running
       ? state.stopping
@@ -1162,15 +1189,6 @@
         ? ""
         : ` · 平台剩余 ${state.platformRemainingQuota}`;
     const dailyLimit = getDailyLimit(adapter);
-    const logsHtml = state.logs.length
-      ? state.logs
-        .map(
-          (item) =>
-            `<div class="aj-log aj-log-${item.level}">[${htmlEscape(item.time)}] ${htmlEscape(item.message)}</div>`,
-        )
-        .join("")
-      : '<div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>';
-
     const part = (selector) => cachedPanel.querySelector(selector);
     part('[data-role="subtitle"]').textContent =
       `v${VERSION} · ${runningText} · 今日已投 ${history.dailyCount}/${dailyLimit}${quotaText}`;
@@ -1192,7 +1210,6 @@
     part('[data-role="current"]').textContent = `当前：${state.current}`;
     part('[data-action="start"]').disabled = state.running;
     part('[data-action="stop"]').disabled = !state.running;
-    part('[data-role="logs"]').innerHTML = logsHtml;
   }
 
   function renderPanelSkeleton(adapter) {
@@ -1213,9 +1230,15 @@
           <button class="aj-btn aj-btn-primary" data-action="start">开始</button>
           <button class="aj-btn aj-btn-danger" data-action="stop">停止</button>
         </div>
-        <div class="aj-logs" data-role="logs"></div>
+        <div class="aj-logs" data-role="logs">
+          <div class="aj-log">暂无日志。点击“开始”按钮进行自动投递。</div>
+        </div>
       </div>
     `;
+    if (state.logs.length) {
+      cachedPanel.querySelector('[data-role="logs"]')
+        .replaceChildren(...state.logs.map(createLogRow));
+    }
     renderConfigForm();
   }
 
@@ -1395,7 +1418,7 @@
         state.running = false;
         state.stopping = false;
         state.current = "异常停止";
-        log("error", `运行异常：${error.message || error}`, error);
+        log("error", `运行异常：${error.message || error}`);
       });
       return;
     }
@@ -1497,6 +1520,7 @@
       }
       await runApplyLoop(adapter, applySession);
     } finally {
+      state.processedKeys = new Set();
       adapter.closeApplySession?.(applySession);
       state.running = false;
       state.stopping = false;
@@ -1575,7 +1599,7 @@
       const cards = adapter.getCards();
       if (cards.length > 0) {
         const jobs = cards
-          .map((card, index) => adapter.buildJob(card, index))
+          .map((card, index) => adapter.buildJob(card, index, state.processedKeys))
           .filter(Boolean);
         return dedupeJobs(jobs).filter(
           (job) => !state.processedKeys.has(getJobUniqueKey(job)),
@@ -1696,7 +1720,6 @@
       log(
         "error",
         `处理失败【${formatJob(job)}】：${error.message || error}`,
-        error,
       );
       if (error.limited) {
         state.current = error.message || "平台限制";
@@ -1792,8 +1815,13 @@
     });
   }
 
-  function buildBossJobDetail(card, index) {
+  function buildBossJobDetail(card, index, processedKeys) {
     const raw = pickJobData(card) || {};
+    const encryptJobId = pickFirstString(raw, ["encryptJobId", "jobId", "encryptJobID"]);
+    // 跨页滚动会保留旧卡片，先用稳定的职位 ID 跳过已处理职位。
+    const key = encryptJobId ? `boss|${encryptJobId}` : "";
+    if (key && processedKeys?.has(key)) return null;
+
     const text = normalizeText(card.innerText || card.textContent || "");
     const jobName =
       pickFirstString(raw, ["jobName", "jobTitle", "title", "positionName"]) ||
@@ -1817,19 +1845,16 @@
     const salaryDesc =
       pickFirstString(raw, ["salaryDesc", "salary", "salaryName"]) ||
       pickDomText(card, [".salary", ".job-salary", ".salary-desc"]);
+    const labels = raw.jobLabels || raw.labels || raw.skills || [];
+    const skills = raw.skills || [];
 
+    // BOSS 通过接口投递，只保留字段快照，避免任务队列持有卡片及 Vue 组件。
     const job = {
       platform: "boss",
       index,
-      card,
-      raw,
       rawText: text,
       securityId: pickFirstString(raw, ["securityId", "securityID"]),
-      encryptJobId: pickFirstString(raw, [
-        "encryptJobId",
-        "jobId",
-        "encryptJobID",
-      ]),
+      encryptJobId,
       lid: pickFirstString(raw, ["lid", "listId"]),
       encryptBossId: pickFirstString(raw, [
         "encryptBossId",
@@ -1855,8 +1880,8 @@
         "scaleName",
       ]),
       brandIndustry: pickFirstString(raw, ["brandIndustry", "industryName"]),
-      jobLabels: raw.jobLabels || raw.labels || raw.skills || [],
-      skills: raw.skills || [],
+      jobLabels: normalizeText(Array.isArray(labels) ? labels.join(" ") : labels),
+      skills: normalizeText(Array.isArray(skills) ? skills.join(" ") : skills),
       detailUrl:
         pickFirstString(raw, ["detailUrl", "jobUrl", "url"]) ||
         card.querySelector('a[href*="/job_detail/"]')?.href ||
@@ -1878,43 +1903,35 @@
     job.recruiterOnline =
       job.bossOnline === true || /在线/.test(job.rawText);
     // lid 随每次搜索变化，用 encryptJobId 作为跨天稳定的去重 key。
-    if (job.encryptJobId) job.key = `boss|${job.encryptJobId}`;
+    if (key) job.key = key;
 
     if (!job.jobName && !job.brandName && !job.securityId) return null;
     return job;
   }
 
   function pickJobData(card) {
-    const candidates = [];
-    const directKeys = [
-      "__vue__",
-      "__vue_app__",
-      "__vueParentComponent",
-      "_vnode",
-    ];
+    const vue = card.__vue__;
+    const component = card.__vueParentComponent;
+    // 先查卡片自身的数据；混入组件实例会提前展开无关 getter 和整页组件树。
+    const direct = findJobLikeObject([
+      vue?._props,
+      vue?.$props,
+      component?.props,
+      vue?._data,
+      vue?.data,
+      component?.data,
+      component?.setupState,
+    ]);
+    if (direct) return direct;
 
-    for (const key of directKeys) {
-      if (card[key]) candidates.push(card[key]);
-    }
-
-    if (card.__vue__) {
-      candidates.push(
-        card.__vue__.data,
-        card.__vue__._data,
-        card.__vue__._props,
-        card.__vue__.$props,
-      );
-    }
-    if (card.__vueParentComponent) {
-      candidates.push(
-        card.__vueParentComponent.props,
-        card.__vueParentComponent.ctx,
-        card.__vueParentComponent.setupState,
-        card.__vueParentComponent.proxy,
-      );
-    }
-
-    return findJobLikeObject(candidates);
+    return findJobLikeObject([
+      vue,
+      card.__vue_app__,
+      component,
+      card._vnode,
+      component?.ctx,
+      component?.proxy,
+    ]);
   }
 
   function findJobLikeObject(seedList) {
@@ -2045,7 +2062,7 @@
       },
     );
     const data = await parseResponse(response);
-    debugBossResponse(job, response, data);
+    if (config.debug) debugBossResponse(job, response, data);
 
     if (!response.ok) {
       return {
@@ -2385,19 +2402,10 @@
 
   function debugBossResponse(job, response, data) {
     const message = extractBossMessage(data);
-    if (
-      !config.debug &&
-      response.ok &&
-      (data?.code === 0 || message === "Success")
-    )
-      return;
-    console.groupCollapsed(
-      `[${APP_ID}] 投递接口响应 ${response.status} ${data?.code ?? ""} ${formatJob(job)}`,
+    log(
+      "debug",
+      `投递接口响应 ${response.status} ${data?.code ?? ""} ${formatJob(job)}：${message.slice(0, 200)}`,
     );
-    console.log("message:", message);
-    console.log("chatRemindDialog:", getChatRemindDialog(data));
-    console.log("raw:", data);
-    console.groupEnd();
   }
 
   async function goBossNextPageOrScroll() {
@@ -3158,13 +3166,13 @@
   }
 
   // editor -> { root, heading, signature }；用于判断点击后是否切换到了新会话。
-  let liepinImSnapshot = new Map();
+  let liepinImSnapshot = new WeakMap();
 
   function snapshotLiepinImWidgetsInDocument(docs) {
     const docList = Array.isArray(docs) ? docs : [docs];
     const widgets = [];
     const seenEditors = new Set();
-    liepinImSnapshot = new Map();
+    liepinImSnapshot = new WeakMap();
     for (const doc of docList) {
       for (const widget of readLiepinImState(doc).widgets) {
         if (seenEditors.has(widget.editor)) continue;
@@ -3311,17 +3319,10 @@
       0,
     );
     if (config.debug) {
-      log("debug", `IM 新会话检测超时，当前检测到 ${widgets.length} 个会话`, {
-        rootsSeen: states.reduce((total, state) => total + state.rootsSeen, 0),
-        inaccessibleFrames,
-        cardFound: Boolean(card && document.contains(card)),
-        widgets: widgets.map((widget) => ({
-          rootClass: String(widget.root.className || "").slice(0, 120),
-          heading: widget.heading.slice(0, 80),
-          editorTag: widget.editor.tagName,
-          editorClass: String(widget.editor.className || "").slice(0, 120),
-        })),
-      });
+      const widgetSummary = widgets.slice(0, 8).map((widget) =>
+        `${widget.heading.slice(0, 80)} [${String(widget.root.className || "").slice(0, 120)}]`,
+      ).join("；");
+      log("debug", `IM 新会话检测超时：会话 ${widgets.length}，容器 ${states.reduce((total, state) => total + state.rootsSeen, 0)}，不可读 iframe ${inaccessibleFrames}${widgetSummary ? `；${widgetSummary}` : ""}`);
     }
 
     const rootsSeen = states.reduce(
@@ -3597,10 +3598,7 @@
     }
     if (!state.editor) {
       if (config.debug) {
-        log("debug", "聊天输入框未找到", {
-          rootClass: String(root.className || "").slice(0, 120),
-          rootTag: root.tagName,
-        });
+        log("debug", `聊天输入框未找到：${String(root.className || "").slice(0, 120)} ${root.tagName}`);
       }
       return { ok: false, message: "未找到聊天输入框" };
     }
@@ -3646,11 +3644,10 @@
     }
     if (!sendButton) {
       if (config.debug) {
-        log("debug", "发送按钮未找到", {
-          editorTag: state.editor?.tagName,
-          editorClass: String(state.editor?.className || "").slice(0, 120),
-          rootClass: String(root.className || "").slice(0, 120),
-        });
+        log(
+          "debug",
+          `发送按钮未找到：${state.editor?.tagName || ""} ${String(state.editor?.className || "").slice(0, 120)} ${String(root.className || "").slice(0, 120)}`,
+        );
       }
       return { ok: false, message: "未找到发送按钮，请人工核对" };
     }
@@ -3716,14 +3713,10 @@
     }
 
     if (config.debug) {
-      log("debug", "招呼发送未确认", {
-        outgoingBefore,
-        outgoing: lastState.outgoing.length,
-        matching: lastState.matching.length,
-        defaultOutgoing: lastState.defaultOutgoing.length,
-        incoming: lastState.incoming.length,
-        editorText: lastState.editorText.slice(0, 80),
-      });
+      log(
+        "debug",
+        `招呼发送未确认：本人消息 ${outgoingBefore} -> ${lastState.outgoing.length}，匹配 ${lastState.matching.length}，默认招呼 ${lastState.defaultOutgoing.length}，招聘方回复 ${lastState.incoming.length}，输入内容 ${lastState.editorText.slice(0, 80)}`,
+      );
     }
 
     return {
@@ -3910,11 +3903,19 @@
 
     let cleaned = false;
     let restoreFramePopupWatch = null;
-    let framePopup = null;
+    const framePopups = new Set();
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       if (restoreFramePopupWatch) restoreFramePopupWatch();
+      for (const popup of framePopups) {
+        try {
+          popup.close();
+        } catch (error) {
+          // ignore
+        }
+      }
+      framePopups.clear();
       try {
         frame.remove();
       } catch (error) {
@@ -4081,7 +4082,7 @@
         const originalOpen = frameWindow.open;
         frameWindow.open = function patchedFrameOpen(...args) {
           const popup = originalOpen.apply(this, args);
-          if (popup) framePopup = popup;
+          if (popup) framePopups.add(popup);
           return popup;
         };
         restoreFramePopupWatch = () => {
@@ -4139,7 +4140,7 @@
         ) {
           break;
         }
-        if (framePopup) break;
+        if (framePopups.size) break;
         // “正在初始化”可以多试两次；普通超时只补点一次，避免无入口岗位拖太久。
         const canRetry = found.error.transient ? attempt < 2 : attempt === 0;
         if (!canRetry) break;
@@ -4148,12 +4149,7 @@
         error: { ok: false, message: "点击后未打开聊天窗口" },
       };
       if (found.error) {
-        if (framePopup) {
-          try {
-            framePopup.close();
-          } catch (error) {
-            // ignore
-          }
+        if (framePopups.size) {
           cleanup();
           return {
             ok: false,
@@ -4282,6 +4278,7 @@
       return result;
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
   }
 
@@ -5120,6 +5117,7 @@
       clickZhaopinElement(applyButton);
     } catch (error) {
       popupWatch.restore();
+      popupWatch.closeAll();
       throw error;
     }
 
@@ -5210,6 +5208,7 @@
       }
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
 
     return {
@@ -5265,6 +5264,7 @@
       clickZhaopinElement(button);
     } catch (error) {
       popupWatch.restore();
+      popupWatch.closeAll();
       throw error;
     }
 
@@ -5362,6 +5362,7 @@
       }
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
 
     return {
@@ -5722,6 +5723,7 @@
       };
     } finally {
       popupWatch.restore();
+      popupWatch.closeAll();
     }
   }
 
@@ -5904,6 +5906,7 @@
       tab.document.write("<!doctype html><title>实习僧自动投递</title><p>正在准备投递…</p>");
       tab.document.close();
     } catch (error) {
+      closeShixisengApplySession(tab);
       return null;
     }
     return tab;
@@ -6142,7 +6145,7 @@
         state.running = false;
         state.stopping = false;
         state.current = "续跑异常";
-        log("error", `续跑异常：${error.message || error}`, error);
+        log("error", `续跑异常：${error.message || error}`);
       });
     }, 1200);
     return true;
